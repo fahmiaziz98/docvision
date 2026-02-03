@@ -6,7 +6,8 @@ from typing import Any, Dict, List, Optional, Type
 from openai import AsyncOpenAI, OpenAI
 from pydantic import BaseModel
 
-from ..workflows import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, TRANSCRIPTION
+
+
 
 
 class VLMClient:
@@ -202,6 +203,8 @@ class VLMClient:
                 )
             final_system_prompt = system_prompt
         else:
+            from ..workflows import DEFAULT_SYSTEM_PROMPT, TRANSCRIPTION
+
             if system_prompt:
                 final_system_prompt = f"{system_prompt}\n\n{TRANSCRIPTION}"
             else:
@@ -209,9 +212,12 @@ class VLMClient:
 
         messages.append({"role": "system", "content": final_system_prompt})
 
+        from ..workflows import DEFAULT_USER_PROMPT
+
         user_content = [
             {"type": "text", "text": user_prompt or DEFAULT_USER_PROMPT},
             {
+
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
             },

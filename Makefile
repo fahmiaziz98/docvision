@@ -1,11 +1,12 @@
-.PHONY: lint format check
+.PHONY: lint format check test test-unit test-integration
 
 # Variables
 PYTHON := python3
 RUFF := ruff
+PYTEST := pytest
 
 # Default target
-all: lint format
+all: lint format test
 
 # Linting
 lint:
@@ -19,3 +20,13 @@ format:
 check:
 	uv run $(RUFF) check .
 	uv run $(RUFF) format --check .
+
+# Testing
+test:
+	uv run $(PYTEST)
+
+test-unit:
+	uv run $(PYTEST) -m unit
+
+test-integration:
+	uv run $(PYTEST) -m integration

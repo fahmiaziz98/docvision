@@ -1,9 +1,10 @@
-from typing import Dict, Literal, Optional
+from typing import TYPE_CHECKING, Dict, Literal, Optional
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, RetryPolicy
 
-from ..core import AgenticParseState, VLMClient
+from ..core.client import VLMClient
+from ..core.types import AgenticParseState
 from ..utils import (
     check_max_tokens_hit,
     detect_retention_loop,
@@ -11,6 +12,9 @@ from ..utils import (
     has_complete_transcription,
 )
 from .prompts import CONTINUE_PROMPT, FIX_PROMPT
+
+if TYPE_CHECKING:
+    from ..core.client import VLMClient
 
 MAX_ITERATIONS = 3
 
@@ -34,7 +38,7 @@ class AgenticWorkflow:
 
     def __init__(
         self,
-        vlm_client: VLMClient,
+        vlm_client: "VLMClient",
         system_prompt: Optional[str] = None,
         user_prompt: Optional[str] = None,
     ):
