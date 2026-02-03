@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Type
 from openai import AsyncOpenAI, OpenAI
 from pydantic import BaseModel
 
-from ..workflows.prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, TRANSCRIPTION
+from ..workflows import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, TRANSCRIPTION
 
 
 class VLMClient:
