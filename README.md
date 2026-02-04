@@ -1,11 +1,13 @@
-# DocVision Parser
+# 📄 DocVision Parser
 
-Production-ready document parsing framework powered by Vision Language Models (VLMs).
+> Production-ready document parsing framework powered by Vision Language Models (VLMs).
 
 [![Tests](https://github.com/fahmiaziz98/doc-vision-parser/workflows/Tests/badge.svg)](https://github.com/fahmiaziz98/doc-vision-parser/actions)
 [![PyPI version](https://badge.fury.io/py/doc-vision-parser.svg)](https://badge.fury.io/py/doc-vision-parser)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](https://opensource.org/licenses/Apache-2.0)
+
+---
 
 ## Overview
 
@@ -22,6 +24,7 @@ The framework supports two primary modes:
 -   **Smart Preprocessing**: Intelligent content-aware cropping, DPI management, and dynamic image optimization to ensure the VLM receives the best possible input.
 -   **OpenAI-Compatible**: Designed to work with any OpenAI-compatible API, including standard OpenAI endpoints, Azure OpenAI, and self-hosted models via vLLM or SGLang.
 -   **Production-Ready**: Includes robust error handling, automatic retries with exponential backoff, and strict output validation.
+-   **Structured Output**: Native support for Pydantic models to extract structured data from documents.
 
 ## Installation
 
@@ -31,11 +34,16 @@ Install using `pip`:
 pip install doc-vision-parser
 ```
 
-Or using `uv`:
+Or using `uv` (recommended):
 
 ```bash
 uv add doc-vision-parser
 ```
+
+### Requirements
+
+- Python 3.10 or higher
+- An OpenAI API key (or compatible endpoint)
 
 ## Quick Start
 
@@ -82,12 +90,17 @@ async def main():
     result = await agent.aparse_pdf(
         "path/to/document.pdf",
         mode=ParsingMode.VLM,
-        max_concurrent=3
+        max_concurrent=3,
+        start_page=1,
+        end_page=3
     )
 
     print(f"Processed {result.total_pages} pages in {result.total_time:.2f}s")
-    for page in result.results:
-        print(f"Page {page.page_number} length: {len(page.content)}")
+    for i in range(len(result.results)):
+        md_content = result.results[i].content
+        page_num = result.results[i].page_number
+        print(f"Page: {page_num}: Content\n{md_content}")
+        print("====="*50)
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -121,12 +134,25 @@ class Invoice(BaseModel):
     total_amount: float
     date: str
 
-system_prompt = "You are a financial analyst."
+system_prompt = """
+You are a financial analyst. 
+Extract the following information from the document: 
+    - invoice number, 
+    - total amount, 
+    - and date.
+"""
+
+agent = DocumentParsingAgent(
+        base_url="https://api.openai.com/v1",
+        model_name="gpt-4o-mini",
+        api_key=os.getenv("OPENAI_API_KEY"),
+        system_prompt=system_prompt   # for structured_output must explicitly define system_prompt
+    )
 
 result = agent.parse_image(
     "invoice.jpg",
-    output_schema=Invoice,
-    system_prompt=system_prompt
+    mode=ParsingMode.VLM,
+    output_schema=Invoice
 )
 
 invoice_data = result.content  # This will be an instance of Invoice
@@ -140,8 +166,9 @@ The `DocumentParsingAgent` is highly configurable.
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `model_name` | `str` | `"gpt-4o-mini"` | The VLM model to use. |
-| `api_key` | `str` | `None` | API key. Uses `OPENAI_API_KEY` env var if not set. |
+| `api_key` | `str` | `None` | API key |
 | `timeout` | `float` | `300.0` | Request timeout in seconds. |
+| `temperature` | `float` | `0.0` | Sampling temperature. |
 | `max_tokens` | `int` | `2048` | Maximum tokens for the response. |
 | `auto_crop` | `bool` | `False` | Enable intelligent content cropping. |
 | `resize` | `bool` | `True` | Resize large images to `max_dimension`. |
@@ -177,6 +204,26 @@ To set up the development environment:
     make test
     ```
 
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
+
 ## License
 
-This project is licensed under the Apache 2.0 License.
+This project is licensed under the Apache 2.0 License. See the [LICENSE](LICENSE) file for details.
+
+## Author
+
+**Fahmi Aziz Fadhil**
+- GitHub: [@fahmiaziz98](https://github.com/fahmiaziz98)
+- Email: fahmiazizfadhil09@gmail.com
+
+---
+
+⭐ If you find this project helpful, please consider giving it a star on GitHub!
