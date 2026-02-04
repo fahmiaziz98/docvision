@@ -8,6 +8,7 @@ __pycache__/
 
 # skills
 .agent/*
+step-by-step.md
 
 # Distribution / packaging
 .Python
