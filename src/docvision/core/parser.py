@@ -40,6 +40,7 @@ class DocumentParsingAgent:
         dpi: int = 300,
         auto_crop: bool = False,
         resize: bool = True,
+        auto_rotate: bool = False,
         max_dimension: int = 2048,
         image_format: Literal["png", "jpeg"] = "jpeg",
         jpeg_quality: int = 95,
@@ -65,6 +66,7 @@ class DocumentParsingAgent:
             dpi: DPI for PDF to image conversion.
             auto_crop: Enable content-aware cropping.
             resize: Enable image resizing.
+            auto_rotate: Enable automatic orientation correction.
             max_dimension: Max width/height for processed images.
             image_format: Encoding format.
             jpeg_quality: Quality for JPEG encoding.
@@ -100,6 +102,7 @@ class DocumentParsingAgent:
             dpi=dpi,
             auto_crop=auto_crop,
             resize=resize,
+            auto_rotate=auto_rotate,
             max_dimension=max_dimension,
             crop_padding=crop_padding,
             crop_ignore_bottom_percent=crop_ignore_bottom_percent,
