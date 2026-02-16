@@ -16,7 +16,7 @@ from .rotate import AutoRotate
 
 class ImageProcessor:
     """
-    Handles image processing tasks including PDF conversion, auto-rotation, 
+    Handles image processing tasks including PDF conversion, auto-rotation,
     cropping, resizing, and encoding.
     """
 
@@ -132,7 +132,9 @@ class ImageProcessor:
             img_np = self._resize_image(img_np)
 
             if self.config.debug_save_path:
-                doc_name = f"processed_page_{page_num}" if page_num is not None else "processed_image"
+                doc_name = (
+                    f"processed_page_{page_num}" if page_num is not None else "processed_image"
+                )
                 self._save_images(
                     [img_np],
                     self.config.debug_save_path,
@@ -200,7 +202,7 @@ class ImageProcessor:
                 filename = f"{doc_name}.{img_format.lower()}"
             else:
                 filename = f"{doc_name}_page_{i}.{img_format.lower()}"
-            
+
             path = output_dir / filename
             if isinstance(image, np.ndarray):
                 cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, quality])

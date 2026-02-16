@@ -4,8 +4,8 @@ from .types import (
     AgenticParseState,
     BatchParseResult,
     ImageFormat,
-    ParseResult,
     ParserConfig,
+    ParseResult,
     ParsingMode,
 )
 
