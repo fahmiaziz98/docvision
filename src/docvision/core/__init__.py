@@ -5,6 +5,7 @@ from .types import (
     BatchParseResult,
     ImageFormat,
     ParseResult,
+    ParserConfig,
     ParsingMode,
 )
 
@@ -12,6 +13,7 @@ __all__ = [
     "VLMClient",
     "DocumentParsingAgent",
     "ImageFormat",
+    "ParserConfig",
     "ParsingMode",
     "ParseResult",
     "BatchParseResult",

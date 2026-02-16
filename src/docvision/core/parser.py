@@ -1,18 +1,19 @@
 import asyncio
 import time
 from pathlib import Path
-from typing import Literal, Optional, Type, Union
+from typing import Optional, Type, Union
 
+import numpy as np
 from PIL import Image
 from pydantic import BaseModel
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as atqdm
 
-from ..processing import ImageProcessor
+from ..processing.image_v2 import ImageProcessor
 from ..workflows import AgenticWorkflow
 from ..workflows.prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
 from .client import VLMClient
-from .types import BatchParseResult, ImageFormat, ParseResult, ParsingMode
+from .types import BatchParseResult, ParserConfig, ParseResult, ParsingMode
 
 
 class DocumentParsingAgent:
@@ -24,93 +25,38 @@ class DocumentParsingAgent:
     - AGENTIC: Self-correcting multi-turn workflow for maximum quality
 
     Attributes:
-        image_format: Format to use for image encoding (png/jpeg).
-        jpeg_quality: Quality setting for JPEG encoding.
-        system_prompt: System prompt for transcription instructions.
-        user_prompt: Initial user prompt for transcription.
+        config: Unified configuration for parser and image processing.
         processor: ImageProcessor instance for PDF/Image handling.
     """
 
-    def __init__(
-        self,
-        base_url: str = "https://api.openai.com/v1",
-        api_key: Optional[str] = None,
-        model_name: str = "gpt-4o-mini",
-        timeout: float = 300.0,
-        dpi: int = 300,
-        auto_crop: bool = False,
-        resize: bool = True,
-        auto_rotate: bool = False,
-        max_dimension: int = 2048,
-        image_format: Literal["png", "jpeg"] = "jpeg",
-        jpeg_quality: int = 95,
-        crop_padding: int = 10,
-        crop_ignore_bottom_percent: float = 12.0,
-        crop_footer_gap_threshold: int = 100,
-        crop_column_ink_ratio: float = 0.01,
-        crop_row_ink_ratio: float = 0.002,
-        system_prompt: Optional[str] = None,
-        user_prompt: Optional[str] = None,
-        temperature: float = 0.1,
-        max_tokens: int = 2048,
-        debug_save_path: Optional[str] = None,
-    ):
+    def __init__(self, config: Optional[ParserConfig] = None):
         """
         Initialize the DocumentParsingAgent.
 
         Args:
-            base_url: Base URL for OpenAI-compatible API.
-            api_key: API key for authentication.
-            model_name: Name of the VLM model.
-            timeout: Request timeout in seconds.
-            dpi: DPI for PDF to image conversion.
-            auto_crop: Enable content-aware cropping.
-            resize: Enable image resizing.
-            auto_rotate: Enable automatic orientation correction.
-            max_dimension: Max width/height for processed images.
-            image_format: Encoding format.
-            jpeg_quality: Quality for JPEG encoding.
-            crop_padding: Padding for cropper.
-            crop_ignore_bottom_percent: Footer ignore height %.
-            crop_footer_gap_threshold: Gap threshold for footer detection.
-            crop_column_ink_ratio: Column ink sensitivity.
-            crop_row_ink_ratio: Row ink sensitivity.
-            system_prompt: Custom system prompt.
-            user_prompt: Custom initial user prompt.
-            temperature: VLM sampling temperature.
-            max_tokens: Max tokens for VLM response.
-            debug_save_path: Directory to save debug images.
+            config: ParserConfig instance with all settings.
+                    If None, uses default configuration.
         """
-        self.api_key = api_key or "EMPTY"
-        self.image_format = image_format
-        self.jpeg_quality = jpeg_quality
-        self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
-        self.user_prompt = user_prompt or DEFAULT_USER_PROMPT
+        self.config = config or ParserConfig()
+
+        # Set default prompts if not provided
+        if self.config.system_prompt is None:
+            self.config.system_prompt = DEFAULT_SYSTEM_PROMPT
+        if self.config.user_prompt is None:
+            self.config.user_prompt = DEFAULT_USER_PROMPT
 
         self._vlm_client = VLMClient(
-            base_url=base_url,
-            api_key=self.api_key,
-            model_name=model_name,
-            timeout=int(timeout),
-            max_tokens=max_tokens,
-            temperature=temperature,
+            base_url=self.config.base_url,
+            api_key=self.config.api_key or "EMPTY",
+            model_name=self.config.model_name,
+            timeout=int(self.config.timeout),
+            max_tokens=self.config.max_tokens,
+            temperature=self.config.temperature,
             max_retries=3,
             retry_delay=2.0,
         )
 
-        self.processor = ImageProcessor(
-            dpi=dpi,
-            auto_crop=auto_crop,
-            resize=resize,
-            auto_rotate=auto_rotate,
-            max_dimension=max_dimension,
-            crop_padding=crop_padding,
-            crop_ignore_bottom_percent=crop_ignore_bottom_percent,
-            crop_footer_gap_threshold=crop_footer_gap_threshold,
-            crop_column_ink_ratio=crop_column_ink_ratio,
-            crop_row_ink_ratio=crop_row_ink_ratio,
-            debug_save_path=debug_save_path,
-        )
+        self.processor = ImageProcessor(config=self.config)
 
         self._agentic_workflow = None
 
@@ -119,8 +65,8 @@ class DocumentParsingAgent:
         if self._agentic_workflow is None:
             self._agentic_workflow = AgenticWorkflow(
                 vlm_client=self._vlm_client,
-                system_prompt=self.system_prompt,
-                user_prompt=self.user_prompt,
+                system_prompt=self.config.system_prompt,
+                user_prompt=self.config.user_prompt,
             )
         return self._agentic_workflow
 
@@ -144,34 +90,44 @@ class DocumentParsingAgent:
         if mode == ParsingMode.AGENTIC:
             raise NotImplementedError("Agentic mode requires async. Use aparse_image() instead.")
 
+        if output_schema and mode == ParsingMode.AGENTIC:
+            raise ValueError("output_schema is only supported in VLM mode")
+
         start_time = time.time()
 
         if isinstance(image, (str, Path)):
             image = Image.open(image)
 
-        processed_img = self.processor.process_image(image, page_num=0, doc_name="image")
+        processed_img = self.processor.process_image(image)
 
-        img_b64, mime_type = self.processor.encode_image(
-            processed_img, ImageFormat(self.image_format), self.jpeg_quality
+        img_b64, mime_type = ImageProcessor.encode_to_base64(
+            processed_img, self.config.image_format, self.config.jpeg_quality
         )
 
         response = self._vlm_client.call(
             img_b64,
             mime_type,
-            self.system_prompt,
-            self.user_prompt,
+            self.config.system_prompt,
+            self.config.user_prompt,
             output_schema=output_schema,
         )
 
         content = response.choices[0].message.content if response and response.choices else ""
         processing_time = time.time() - start_time
 
+        # Get image size from numpy array
+        img_size = (
+            (processed_img.shape[1], processed_img.shape[0])
+            if isinstance(processed_img, np.ndarray)
+            else processed_img.size
+        )
+
         return ParseResult(
             content=content,
             page_number=0,
             processing_time=processing_time,
             metadata={
-                "image_size": processed_img.size,
+                "image_size": img_size,
                 "mime_type": mime_type,
                 "mode": mode.value,
                 "structured": bool(output_schema),
@@ -192,8 +148,8 @@ class DocumentParsingAgent:
         Args:
             pdf_path: Path to the PDF file.
             mode: Parsing mode (VLM or AGENTIC).
-            start_page: First page index to parse.
-            end_page: Last page index to parse.
+            start_page: First page index to parse (1-indexed).
+            end_page: Last page index to parse (1-indexed).
             output_schema: Optional Pydantic model for structured output (VLM mode only).
 
         Returns:
@@ -201,6 +157,9 @@ class DocumentParsingAgent:
         """
         if mode == ParsingMode.AGENTIC:
             raise NotImplementedError("Agentic mode requires async. Use aparse_pdf() instead.")
+
+        if output_schema and mode == ParsingMode.AGENTIC:
+            raise ValueError("output_schema is only supported in VLM mode")
 
         batch_start = time.time()
 
@@ -211,23 +170,21 @@ class DocumentParsingAgent:
         errors = []
         success_count = 0
 
-        doc_name = Path(pdf_path).stem
-
         for idx, img in tqdm(enumerate(images), total=total_pages, desc="Processing pages"):
-            page_num = (start_page or 0) + idx
+            page_num = (start_page or 1) + idx
 
             try:
-                processed_img = self.processor.process_image(img, page_num, doc_name)
-                img_b64, mime_type = self.processor.encode_image(
-                    processed_img, ImageFormat(self.image_format), self.jpeg_quality
+                processed_img = self.processor.process_image(img, page_num=page_num)
+                img_b64, mime_type = ImageProcessor.encode_to_base64(
+                    processed_img, self.config.image_format, self.config.jpeg_quality
                 )
 
                 page_start = time.time()
                 response = self._vlm_client.call(
                     img_b64,
                     mime_type,
-                    self.system_prompt,
-                    self.user_prompt,
+                    self.config.system_prompt,
+                    self.config.user_prompt,
                     output_schema=output_schema,
                 )
 
@@ -236,12 +193,19 @@ class DocumentParsingAgent:
                 )
                 processing_time = time.time() - page_start
 
+                # Get image size from numpy array
+                img_size = (
+                    (processed_img.shape[1], processed_img.shape[0])
+                    if isinstance(processed_img, np.ndarray)
+                    else processed_img.size
+                )
+
                 result = ParseResult(
                     content=content,
                     page_number=page_num,
                     processing_time=processing_time,
                     metadata={
-                        "image_size": processed_img.size,
+                        "image_size": img_size,
                         "mime_type": mime_type,
                         "mode": mode.value,
                         "structured": bool(output_schema),
@@ -290,18 +254,18 @@ class DocumentParsingAgent:
         if isinstance(image, (str, Path)):
             image = Image.open(image)
 
-        processed_img = self.processor.process_image(image, page_num=0, doc_name="image")
+        processed_img = self.processor.process_image(image)
 
-        img_b64, mime_type = self.processor.encode_image(
-            processed_img, ImageFormat(self.image_format), self.jpeg_quality
+        img_b64, mime_type = ImageProcessor.encode_to_base64(
+            processed_img, self.config.image_format, self.config.jpeg_quality
         )
 
         if mode == ParsingMode.VLM:
             response = await self._vlm_client.acall(
                 img_b64,
                 mime_type,
-                self.system_prompt,
-                self.user_prompt,
+                self.config.system_prompt,
+                self.config.user_prompt,
                 output_schema=output_schema,
             )
             content = response.choices[0].message.content if response and response.choices else ""
@@ -320,12 +284,19 @@ class DocumentParsingAgent:
 
         processing_time = time.time() - start_time
 
+        # Get image size from numpy array
+        img_size = (
+            (processed_img.shape[1], processed_img.shape[0])
+            if isinstance(processed_img, np.ndarray)
+            else processed_img.size
+        )
+
         return ParseResult(
             content=content,
             page_number=0,
             processing_time=processing_time,
             metadata={
-                "image_size": processed_img.size,
+                "image_size": img_size,
                 "mime_type": mime_type,
                 "mode": mode.value,
                 "iterations": iterations,
@@ -349,8 +320,8 @@ class DocumentParsingAgent:
         Args:
             pdf_path: Path to the PDF file.
             mode: Parsing mode (VLM or AGENTIC).
-            start_page: First page index to parse.
-            end_page: Last page index to parse.
+            start_page: First page index to parse (1-indexed).
+            end_page: Last page index to parse (1-indexed).
             output_schema: Optional Pydantic model for structured output (VLM mode only).
             max_concurrent: Maximum number of concurrent page parsing tasks.
 
@@ -369,18 +340,17 @@ class DocumentParsingAgent:
         errors = []
 
         semaphore = asyncio.Semaphore(max_concurrent)
-        doc_name = Path(pdf_path).stem
 
         workflow = self._get_agentic_workflow() if mode == ParsingMode.AGENTIC else None
 
-        async def process_page(idx: int, img: Image.Image):
-            page_num = (start_page or 0) + idx
+        async def process_page(idx: int, img: np.ndarray):
+            page_num = (start_page or 1) + idx
 
             async with semaphore:
                 try:
-                    processed_img = self.processor.process_image(img, page_num, doc_name)
-                    img_b64, mime_type = self.processor.encode_image(
-                        processed_img, ImageFormat(self.image_format), self.jpeg_quality
+                    processed_img = self.processor.process_image(img, page_num=page_num)
+                    img_b64, mime_type = ImageProcessor.encode_to_base64(
+                        processed_img, self.config.image_format, self.config.jpeg_quality
                     )
 
                     page_start = time.time()
@@ -389,8 +359,8 @@ class DocumentParsingAgent:
                         response = await self._vlm_client.acall(
                             img_b64,
                             mime_type,
-                            self.system_prompt,
-                            self.user_prompt,
+                            self.config.system_prompt,
+                            self.config.user_prompt,
                             output_schema=output_schema,
                         )
                         content = (
@@ -412,12 +382,19 @@ class DocumentParsingAgent:
 
                     processing_time = time.time() - page_start
 
+                    # Get image size from numpy array
+                    img_size = (
+                        (processed_img.shape[1], processed_img.shape[0])
+                        if isinstance(processed_img, np.ndarray)
+                        else processed_img.size
+                    )
+
                     return ParseResult(
                         content=content,
                         page_number=page_num,
                         processing_time=processing_time,
                         metadata={
-                            "image_size": processed_img.size,
+                            "image_size": img_size,
                             "mime_type": mime_type,
                             "mode": mode.value,
                             "iterations": iterations,

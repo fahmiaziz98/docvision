@@ -6,6 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
+# examples
+examples/
+
 # skills
 .agent/*
 step-by-step.md

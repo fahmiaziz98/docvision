@@ -1,4 +1,4 @@
 from .__version__ import __version__
-from .core import DocumentParsingAgent, ParsingMode
+from .core import DocumentParsingAgent, ParserConfig, ParsingMode
 
-__all__ = ["__version__", "DocumentParsingAgent", "ParsingMode"]
+__all__ = ["__version__", "DocumentParsingAgent", "ParserConfig", "ParsingMode"]
