@@ -53,14 +53,17 @@ The simplest way to parse an image is using the `DocumentParsingAgent` in VLM mo
 
 ```python
 import os
-from docvision import DocumentParsingAgent
+from docvision import DocumentParsingAgent, ParserConfig
 
-# Initialize the agent
-agent = DocumentParsingAgent(
+# Initialize configuration
+config = ParserConfig(
     base_url="https://api.openai.com/v1",
     model_name="gpt-4o-mini",
     api_key=os.getenv("OPENAI_API_KEY"),
 )
+
+# Initialize the agent
+agent = DocumentParsingAgent(config=config)
 
 # Parse an image synchronously
 result = agent.parse_image("path/to/document.jpg")
@@ -77,14 +80,15 @@ For processing PDFs or multiple files efficiently, use the asynchronous efficien
 
 ```python
 import asyncio
-from docvision import DocumentParsingAgent, ParsingMode
+from docvision import DocumentParsingAgent, ParserConfig, ParsingMode
 
 async def main():
-    agent = DocumentParsingAgent(
+    config = ParserConfig(
         base_url="https://api.openai.com/v1",
         model_name="gpt-4o-mini",
         api_key=os.getenv("OPENAI_API_KEY"),
     )
+    agent = DocumentParsingAgent(config=config)
 
     # Parse a PDF asynchronously
     result = await agent.aparse_pdf(
@@ -142,12 +146,14 @@ Extract the following information from the document:
     - and date.
 """
 
-agent = DocumentParsingAgent(
+    config = ParserConfig(
         base_url="https://api.openai.com/v1",
         model_name="gpt-4o-mini",
         api_key=os.getenv("OPENAI_API_KEY"),
-        system_prompt=system_prompt   # for structured_output must explicitly define system_prompt
+        system_prompt=system_prompt,  # for structured_output must explicitly define system_prompt
     )
+    
+    agent = DocumentParsingAgent(config=config)
 
 result = agent.parse_image(
     "invoice.jpg",
@@ -161,20 +167,68 @@ print(invoice_data.total_amount)
 
 ## Configuration
 
-The `DocumentParsingAgent` is highly configurable.
+The `DocumentParsingAgent` is configured via the `ParserConfig` class.
+
+### Configuration Parameters
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
+| `base_url` | `str` | `"https://api.openai.com/v1"` | Base URL for the VLM API. |
+| `api_key` | `Optional[str]` | `None` | API key for authentication. |
 | `model_name` | `str` | `"gpt-4o-mini"` | The VLM model to use. |
-| `api_key` | `str` | `None` | API key |
 | `timeout` | `float` | `300.0` | Request timeout in seconds. |
-| `temperature` | `float` | `0.0` | Sampling temperature. |
-| `max_tokens` | `int` | `2048` | Maximum tokens for the response (increase this value if the documents are long). |
-| `auto_crop` | `bool` | `False` | Enable intelligent content cropping. |
-| `resize` | `bool` | `True` | Resize large images to `max_dimension`. |
-| `max_dimension` | `int` | `2048` | Max width/height for resizing. |
-| `dpi` | `int` | `300` | DPI for PDF to image conversion. |
-| `image_format` | `str` | `"jpeg"` | Image encoding format ("jpeg" or "png"). |
+| `temperature` | `float` | `0.1` | Sampling temperature. |
+| `max_tokens` | `int` | `2048` | Maximum tokens for response. |
+| `render_zoom` | `float` | `2.0` | PDF render zoom factor (2.0 ≈ 300 DPI). |
+| `post_crop_max_size` | `int` | `2048` | Max dimension after cropping. |
+| `enable_auto_rotate` | `bool` | `True` | Automatically correct image orientation. |
+| `enable_crop` | `bool` | `True` | Enable intelligent content cropping. |
+| `crop_padding` | `int` | `10` | Padding around cropped content. |
+| `crop_ignore_bottom_percent` | `float` | `12.0` | Percentage of bottom margin to ignore during crop detection. |
+| `debug_save_path` | `Optional[str]` | `None` | Path to save debug images (crops, rotations). |
+
+### Comprehensive Configuration Example
+
+For fine-grained control over image processing and model parameters, utilize `ParserConfig` fully:
+
+```python
+import os
+from docvision import DocumentParsingAgent, ParserConfig, ParsingMode
+
+# Define custom prompts
+system_prompt = """You are a document extraction assistant. Extract all text from the document preserving the original structure and formatting. Use markdown format for the output."""
+
+user_prompt = """Please extract all text from this image, maintaining the original structure and formatting."""
+
+# Create advanced configuration
+config = ParserConfig(
+    # VLM Settings
+    base_url="https://api.groq.com/openai/v1",
+    api_key=os.getenv("GROQ_API_KEY"),
+    model_name="llama-3.2-90b-vision-preview",
+    timeout=300.0,
+    temperature=0.1,
+    max_tokens=4096,
+    
+    # Custom Prompts
+    system_prompt=system_prompt,
+    user_prompt=user_prompt,
+    
+    # Image Configuration
+    render_zoom=3.0,          # High quality rendering (~450 DPI)
+    enable_crop=True,         # Auto-crop to content
+    enable_auto_rotate=True,  # Fix orientation
+    crop_padding=20,          # Add breathing room
+    crop_ignore_bottom_percent=10.0, # Ignore footer noise
+    post_crop_max_size=3072,  # Allow larger images for the model
+    
+    # Debugging
+    debug_save_path="./debug_output", # Save intermediate images
+)
+
+# Initialize agent with custom config
+agent = DocumentParsingAgent(config=config)
+```
 
 ## Architecture
 
