@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as atqdm
 
-from ..processing.image_v2 import ImageProcessor
+from ..processing.image import ImageProcessor
 from ..workflows import AgenticWorkflow
 from ..workflows.prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
 from .client import VLMClient

@@ -1,5 +1,4 @@
 import base64
-from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
@@ -8,231 +7,269 @@ import cv2
 import fitz
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 
-from ..core.types import ImageFormat
+from ..core.types import ImageFormat, ParserConfig
 from .crop import ContentCropper
-from .rotate import ImageRotator
+from .rotate import AutoRotate
 
 
 class ImageProcessor:
     """
-    Handles PDF to image conversion and subsequent image optimization including
-    auto-rotation, cropping, resizing, and base64 encoding.
+    Handles image processing tasks including PDF conversion, auto-rotation, 
+    cropping, resizing, and encoding.
     """
 
-    def __init__(
-        self,
-        dpi: int = 300,
-        auto_crop: bool = False,
-        auto_rotate: bool = False,
-        resize: bool = True,
-        max_dimension: int = 2048,
-        crop_padding: int = 10,
-        crop_ignore_bottom_percent: float = 12.0,
-        crop_footer_gap_threshold: int = 100,
-        crop_column_ink_ratio: float = 0.01,
-        crop_row_ink_ratio: float = 0.002,
-        rotate_score_diff_threshold: float = 0.35,
-        rotate_small_angle_threshold: float = 0.1,
-        rotate_analysis_max_size: int = 1500,
-        debug_save_path: Optional[str] = None,
-    ):
+    def __init__(self, config: Optional[ParserConfig] = None):
         """
-        Initialize the ImageProcessor.
+        Initialize the ImageProcessor with configuration.
 
         Args:
-            dpi: Dots per inch for PDF rendering.
-            auto_crop: Whether to automatically crop the image content.
-            auto_rotate: Whether to automatically correct the image orientation.
-            resize: Whether to resize the image to a fixed or maximum dimension.
-            max_dimension: Maximum dimension (width or height) for the processed image.
-            crop_padding: Padding for the auto-crop.
-            crop_ignore_bottom_percent: Footer ignore percentage for auto-crop.
-            crop_footer_gap_threshold: Vertical gap threshold for auto-crop.
-            crop_column_ink_ratio: Column ink ratio for auto-crop.
-            crop_row_ink_ratio: Row ink ratio for auto-crop.
-            rotate_score_diff_threshold: Minimum score difference for rotation confidence.
-            rotate_small_angle_threshold: Minimum angle for micro-rotation correction.
-            rotate_analysis_max_size: Max dimension for rotation analysis.
-            debug_save_path: Path to save intermediate images for debugging.
+            config: Configuration object. If None, default ParserConfig is used.
         """
-        self.dpi = dpi
-        self.auto_crop = auto_crop
-        self.auto_rotate = auto_rotate
-        self.resize = resize
-        self.max_dimension = max_dimension
-        self.debug_save_path = Path(debug_save_path) if debug_save_path else None
+        self.config = config or ParserConfig()
 
-        if self.debug_save_path:
-            self.debug_save_path.mkdir(parents=True, exist_ok=True)
-
-        self.cropper = (
-            ContentCropper(
-                padding=crop_padding,
-                ignore_bottom_percent=crop_ignore_bottom_percent,
-                footer_gap_threshold=crop_footer_gap_threshold,
-                column_ink_ratio=crop_column_ink_ratio,
-                row_ink_ratio=crop_row_ink_ratio,
+        self.rotation_pipeline = None
+        if self.config.enable_auto_rotate:
+            self.rotation_pipeline = AutoRotate(
+                hough_threshold=self.config.hough_threshold,
+                min_score_diff=self.config.min_score_diff,
+                analysis_max_size=self.config.analysis_max_size,
+                use_aspect_ratio_fallback=self.config.use_aspect_ratio_fallback,
+                aggressive_mode=self.config.aggressive_mode,
             )
-            if auto_crop
-            else None
-        )
-
-        self.rotator = (
-            ImageRotator(
-                score_diff_threshold=rotate_score_diff_threshold,
-                small_angle_threshold=rotate_small_angle_threshold,
-                analysis_max_size=rotate_analysis_max_size,
+        self.cropper = None
+        if self.config.enable_crop:
+            self.cropper = ContentCropper(
+                padding=self.config.crop_padding,
+                ignore_bottom_percent=self.config.crop_ignore_bottom_percent,
+                max_crop_percent=self.config.crop_max_crop_percent,
             )
-            if auto_rotate
-            else None
-        )
 
     def pdf_to_images(
         self,
         pdf_path: Union[str, Path],
         start_page: Optional[int] = None,
         end_page: Optional[int] = None,
-    ) -> List[Image.Image]:
+    ) -> List[np.ndarray]:
         """
-        Convert specific pages of a PDF file into a list of PIL Images.
+        Convert a PDF file into a list of images (numpy arrays).
 
         Args:
             pdf_path: Path to the PDF file.
-            start_page: Index of the first page to convert (0-indexed).
-            end_page: Index of the last page to convert (inclusive).
+            start_page: The first page to convert (1-indexed).
+            end_page: The last page to convert (1-indexed, inclusive).
 
         Returns:
-            A list of PIL Color images.
+            A list of images as numpy arrays (BGR format).
         """
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
-            raise FileNotFoundError(f"PDF not found: {pdf_path}")
+            raise FileNotFoundError(f"PDF file not found: {pdf_path}")
 
-        doc = fitz.open(str(pdf_path))
-        total_pages = doc.page_count
+        if start_page is None:
+            start_page = 1
 
-        start = start_page or 0
-        end = end_page or (total_pages - 1)
+        try:
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
 
-        start = max(0, min(start, total_pages - 1))
-        end = max(start, min(end, total_pages - 1))
+            start_page = max(1, start_page)
+            end_page = min(total_pages, end_page or total_pages)
 
-        images = []
-        zoom = self.dpi / 72.0
-        matrix = fitz.Matrix(zoom, zoom)
+            page_iterator = range(start_page, end_page + 1)
+            if self.config.progress_callback is None:
+                page_iterator = tqdm(page_iterator, desc="Converting PDF to images")
 
-        for page_num in range(start, end + 1):
-            page = doc.load_page(page_num)
-            pix = page.get_pixmap(matrix=matrix, alpha=False)
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            images.append(img)
+            images = []
+            for page_num in page_iterator:
+                page = doc.load_page(page_num - 1)
+                pix = page.get_pixmap(
+                    matrix=fitz.Matrix(self.config.render_zoom, self.config.render_zoom),
+                    alpha=False,
+                )
+                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                    (pix.height, pix.width, pix.n)
+                )
 
-        doc.close()
-        return images
+                if pix.n == 4:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                else:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+                images.append(img)
+
+            doc.close()
+            return images
+        except Exception as e:
+            raise RuntimeError(f"Failed to convert PDF to images: {e}")
 
     def process_image(
-        self, image: Image.Image, page_num: int = 0, doc_name: str = "image"
-    ) -> Image.Image:
+        self, image: Union[np.ndarray, Image.Image], page_num: Optional[int] = None
+    ) -> Union[np.ndarray, Image.Image]:
         """
-        Apply processing operations such as auto-rotation, cropping, and resizing to an image.
+        Apply enabled processing steps (rotation, cropping, resizing) to an image.
 
         Args:
-            image: PIL Image input.
-            page_num: Page index for logging/debugging.
-            doc_name: Document identifier for debugging filenames.
+            image: The input image (numpy array or PIL Image).
+            page_num: Optional page number for naming debug images.
 
         Returns:
-            The processed PIL Image.
+            The processed image.
         """
-        img_np = np.array(image)
-        # Convert RGB to BGR for OpenCV
-        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-
-        # 1. Auto-Rotate
-        if self.auto_rotate and self.rotator:
-            img_bgr = self.rotator.rotate(img_bgr)
-
-        # 2. Auto-Crop
-        if self.auto_crop and self.cropper:
-            img_bgr = self.cropper.crop(img_bgr)
-
-        # 3. Resize
-        if self.resize:
-            img_bgr = self._resize_image(img_bgr)
+        if isinstance(image, np.ndarray):
+            img_np = image
         else:
-            # Thumbnail if exceeds max dimension
-            h, w = img_bgr.shape[:2]
-            if max(h, w) > self.max_dimension:
-                scale = self.max_dimension / max(h, w)
-                new_w = int(w * scale)
-                new_h = int(h * scale)
-                img_bgr = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+            img_np = np.array(image)
 
-        # Convert back to PIL RGB
-        processed_image = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
+        try:
+            if self.config.enable_auto_rotate:
+                img_np, rotation_result = self.rotation_pipeline.auto_rotate(img_np)
 
-        # Debug Save
-        if self.debug_save_path:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            debug_filename = f"{doc_name}_page{page_num:03d}_{timestamp}.png"
-            debug_path = self.debug_save_path / debug_filename
-            processed_image.save(debug_path, "PNG")
+            if self.config.enable_crop:
+                img_np = self.cropper.crop(img_np)
 
-        return processed_image
+            img_np = self._resize_image(img_np)
 
-    def encode_image(
-        self,
-        image: Image.Image,
-        image_format: ImageFormat = ImageFormat.JPEG,
-        jpeg_quality: int = 95,
-    ) -> Tuple[str, str]:
+            if self.config.debug_save_path:
+                doc_name = f"processed_page_{page_num}" if page_num is not None else "processed_image"
+                self._save_images(
+                    [img_np],
+                    self.config.debug_save_path,
+                    doc_name,
+                    ImageFormat.JPEG,
+                    self.config.jpeg_quality,
+                )
+
+            return img_np
+        except Exception as e:
+            raise RuntimeError(f"Failed to process image: {e}")
+
+    def _resize_image(
+        self, image: Union[np.ndarray, Image.Image]
+    ) -> Union[np.ndarray, Image.Image]:
         """
-        Encode a PIL Image into a base64 string.
+        Resize the image if its dimensions exceed the configured maximum size.
 
         Args:
-            image: PIL Image to encode.
-            image_format: Targeted image format (JPEG or PNG).
-            jpeg_quality: Quality factor for JPEG encoding (0-100).
+            image: Input image.
 
         Returns:
-            A tuple containing (base64_string, mime_type).
+            Resized image.
         """
-        buffer = BytesIO()
-
-        if image_format == ImageFormat.JPEG:
-            image.save(
-                buffer,
-                format="JPEG",
-                quality=jpeg_quality,
-                optimize=True,
-                subsampling=0,
-            )
-            mime_type = "image/jpeg"
+        if isinstance(image, np.ndarray):
+            h, w = image.shape[:2]
         else:
-            image.save(buffer, format="PNG", optimize=True)
-            mime_type = "image/png"
+            h, w = image.size
 
-        b64_data = base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-        return b64_data, mime_type
-
-    def _resize_image(self, image: np.ndarray) -> np.ndarray:
-        """
-        Resize large images to prevent memory issues and optimize for VLMs.
-
-        Args:
-            image: Image as a numpy array.
-
-        Returns:
-            Resized image as a numpy array.
-        """
-        h, w = image.shape[:2]
-
-        if max(h, w) > self.max_dimension:
-            scale = self.max_dimension / max(h, w)
+        if max(h, w) > self.config.post_crop_max_size:
+            scale = self.config.post_crop_max_size / max(h, w)
             new_w = int(w * scale)
             new_h = int(h * scale)
             image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 
         return image
+
+    def _save_images(
+        self,
+        images: List[Union[np.ndarray, Image.Image]],
+        output_dir: Union[str, Path],
+        doc_name: str = "images",
+        img_format: ImageFormat = ImageFormat.JPEG,
+        quality: int = 95,
+    ) -> List[str]:
+        """
+        Save a list of images to a specified directory.
+
+        Args:
+            images: List of images to save.
+            output_dir: Target directory.
+            doc_name: Prefix for the filename.
+            img_format: Output image format.
+            quality: JPEG quality (if applicable).
+
+        Returns:
+            A list of paths where the images were saved.
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        saved_paths = []
+        for i, image in enumerate(images):
+            if "page" in doc_name:
+                filename = f"{doc_name}.{img_format.lower()}"
+            else:
+                filename = f"{doc_name}_page_{i}.{img_format.lower()}"
+            
+            path = output_dir / filename
+            if isinstance(image, np.ndarray):
+                cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+            else:
+                image.save(path)
+            saved_paths.append(str(path))
+
+        return saved_paths
+
+    @staticmethod
+    def encode_to_base64(
+        image: Union[np.ndarray, Image.Image],
+        img_format: ImageFormat = ImageFormat.JPEG,
+        quality: int = 95,
+    ) -> Tuple[str, str]:
+        """
+        Encode an image to a base64 string.
+
+        Args:
+            image: Image to encode.
+            img_format: Target format for encoding.
+            quality: Quality for compression.
+
+        Returns:
+            A tuple of (base64_string, mime_type).
+        """
+        if isinstance(image, np.ndarray):
+            if image.shape[2] == 3:
+                pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+            else:
+                pil_image = Image.fromarray(image)
+        else:
+            pil_image = image
+
+        buffer = BytesIO()
+        fmt = img_format.lower()
+
+        if fmt in ("jpg", "jpeg"):
+            if pil_image.mode != "RGB":
+                pil_image = pil_image.convert("RGB")
+            pil_image.save(buffer, format="JPEG", quality=quality, optimize=True)
+            mime_type = "image/jpeg"
+        elif fmt == "png":
+            pil_image.save(buffer, format="PNG", optimize=True)
+            mime_type = "image/png"
+        elif fmt == "webp":
+            pil_image.save(buffer, format="WEBP", quality=quality)
+            mime_type = "image/webp"
+        else:
+            raise ValueError(f"Unsupported format: {img_format}")
+
+        b64_data = base64.b64encode(buffer.getvalue()).decode("utf-8")
+        return b64_data, mime_type
+
+    @staticmethod
+    def encode_batch(
+        images: List[Union[np.ndarray, Image.Image]],
+        img_format: ImageFormat = ImageFormat.JPEG,
+        quality: int = 95,
+    ) -> List[Tuple[str, str]]:
+        """
+        Encode a batch of images to their base64 representations.
+
+        Args:
+            images: List of images.
+            img_format: Target format.
+            quality: Compression quality.
+
+        Returns:
+            A list of (base64_string, mime_type) tuples.
+        """
+        return [ImageProcessor.encode_to_base64(image, img_format, quality) for image in images]
