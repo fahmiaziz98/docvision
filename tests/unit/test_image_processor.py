@@ -1,35 +1,34 @@
-import pytest
-import numpy as np
-import pytest_asyncio
-from unittest.mock import MagicMock, patch, AsyncMock
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import pytest
 from PIL import Image
 
-from docvision.core.types import ParserConfig, ImageFormat
+from docvision.core.types import ImageFormat, ParserConfig
 from docvision.processing.image import ImageProcessor
 
 
 @pytest.fixture
 def basic_config():
-    return ParserConfig(
-        enable_auto_rotate=False,
-        enable_crop=False,
-        render_zoom=1.0
-    )
+    return ParserConfig(enable_auto_rotate=False, enable_crop=False, render_zoom=1.0)
+
 
 @pytest.fixture
 def processor(basic_config):
     return ImageProcessor(config=basic_config)
+
 
 @pytest.fixture
 def sample_image_np():
     # Create a simple 100x100 RGB image (numpy array)
     return np.zeros((100, 100, 3), dtype=np.uint8)
 
+
 @pytest.fixture
 def sample_image_pil():
     # Create a simple 100x100 RGB image (PIL)
-    return Image.new('RGB', (100, 100), color='red')
+    return Image.new("RGB", (100, 100), color="red")
 
 
 @pytest.mark.unit
@@ -62,10 +61,10 @@ class TestImageEncoding:
         assert len(b64) > 0
 
     def test_encode_invalid_format(self, processor, sample_image_pil):
-        # We need to mock ImageFormat enum or pass a string if types allowed, 
+        # We need to mock ImageFormat enum or pass a string if types allowed,
         # but encode_to_base64 uses .lower() on the enum value.
         # Let's assume we pass a valid enum but one that isn't handled if any?
-        # Actually types.py likely only has JPEG, PNG. 
+        # Actually types.py likely only has JPEG, PNG.
         # If we pass a random object it might fail.
         pass  # Skip for now as enum restricts values
 
@@ -91,10 +90,10 @@ class TestImageProcessing:
         with patch("pathlib.Path.mkdir"):
             processor._save_images([sample_image_np], "/tmp/debug", "test_doc")
             mock_imwrite.assert_called_once()
-    
+
     def test_process_image_with_debug(self, processor, sample_image_np):
         processor.config.debug_save_path = "/tmp/debug"
-        with patch.object(processor, '_save_images') as mock_save:
+        with patch.object(processor, "_save_images") as mock_save:
             processor.process_image(sample_image_np, page_num=1)
             mock_save.assert_called_once()
 
@@ -107,24 +106,24 @@ class TestPDFConversion:
         mock_doc = MagicMock()
         mock_page = MagicMock()
         mock_pix = MagicMock()
-        
+
         # Setup page return
         mock_doc.load_page.return_value = mock_page
         mock_doc.__len__.return_value = 1
-        
+
         # Setup pixmap
-        mock_pix.samples = b'\x00' * (100 * 100 * 3)
+        mock_pix.samples = b"\x00" * (100 * 100 * 3)
         mock_pix.height = 100
         mock_pix.width = 100
         mock_pix.n = 3
-        
+
         mock_page.get_pixmap.return_value = mock_pix
         mock_fitz_open.return_value = mock_doc
 
         # We also need to mock Path.exists
         with patch("pathlib.Path.exists", return_value=True):
             images = processor.pdf_to_images("dummy.pdf")
-            
+
             assert len(images) == 1
             assert isinstance(images[0], np.ndarray)
             mock_fitz_open.assert_called_with(Path("dummy.pdf"))
