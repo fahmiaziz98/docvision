@@ -256,22 +256,3 @@ class ImageProcessor:
 
         b64_data = base64.b64encode(buffer.getvalue()).decode("utf-8")
         return b64_data, mime_type
-
-    @staticmethod
-    def encode_batch(
-        images: List[Union[np.ndarray, Image.Image]],
-        img_format: ImageFormat = ImageFormat.JPEG,
-        quality: int = 95,
-    ) -> List[Tuple[str, str]]:
-        """
-        Encode a batch of images to their base64 representations.
-
-        Args:
-            images: List of images.
-            img_format: Target format.
-            quality: Compression quality.
-
-        Returns:
-            A list of (base64_string, mime_type) tuples.
-        """
-        return [ImageProcessor.encode_to_base64(image, img_format, quality) for image in images]
