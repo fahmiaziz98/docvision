@@ -67,6 +67,7 @@ class DocumentParsingAgent:
                 vlm_client=self._vlm_client,
                 system_prompt=self.config.system_prompt,
                 user_prompt=self.config.user_prompt,
+                max_iterations=self.config.max_iterations,
             )
         return self._agentic_workflow
 
@@ -417,6 +418,8 @@ class DocumentParsingAgent:
             result = await coro
             page_results.append(result)
 
+        page_results.sort(key=lambda x: x.page_number if isinstance(x, ParseResult) else x.get("page", 0))
+        
         for result in page_results:
             if isinstance(result, dict) and result.get("error"):
                 errors.append(

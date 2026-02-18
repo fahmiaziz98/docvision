@@ -179,6 +179,7 @@ The `DocumentParsingAgent` is configured via the `ParserConfig` class.
 | `timeout` | `float` | `300.0` | Request timeout in seconds. |
 | `temperature` | `float` | `0.1` | Sampling temperature. |
 | `max_tokens` | `int` | `2048` | Maximum tokens for response. |
+| `max_iterations` | `int` | `3` | Maximum number of iterations for agentic mode. |
 | `render_zoom` | `float` | `2.0` | PDF render zoom factor (2.0 ≈ 300 DPI). |
 | `post_crop_max_size` | `int` | `2048` | Max dimension after cropping. |
 | `enable_auto_rotate` | `bool` | `True` | Automatically correct image orientation. |
@@ -209,6 +210,7 @@ config = ParserConfig(
     timeout=300.0,
     temperature=0.1,
     max_tokens=4096,
+    max_iterations=5,
     
     # Custom Prompts
     system_prompt=system_prompt,

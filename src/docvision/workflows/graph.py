@@ -41,6 +41,7 @@ class AgenticWorkflow:
         vlm_client: "VLMClient",
         system_prompt: Optional[str] = None,
         user_prompt: Optional[str] = None,
+        max_iterations: int = 3,
     ):
         """
         Initialize the AgenticWorkflow.
@@ -49,10 +50,12 @@ class AgenticWorkflow:
             vlm_client: An instance of VLMClient for making API calls.
             system_prompt: Optional override for the system prompt. Defaults to XML extraction rules.
             user_prompt: Optional override for the initial user prompt.
+            max_iterations: Maximum number of iterations to run the workflow.
         """
         self.vlm_client = vlm_client
         self.system_prompt = system_prompt
         self.user_prompt = user_prompt
+        self.max_iterations = max_iterations
 
         self.graph = self._build_graph()
 
@@ -117,7 +120,7 @@ class AgenticWorkflow:
         iteration = state["iteration_count"] + 1
 
         # Safety limit: Prevent infinite loops
-        if iteration > MAX_ITERATIONS:
+        if iteration > self.max_iterations:
             transcription = extract_transcription(state["accumulated_text"])
             return Command(
                 update={

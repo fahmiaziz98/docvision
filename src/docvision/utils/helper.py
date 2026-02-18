@@ -3,7 +3,7 @@ from typing import Optional
 
 
 def detect_retention_loop(
-    text: str, min_pattern_length: int = 10, threshold: int = 50
+    text: str, min_pattern_length: int = 30, threshold: int = 8
 ) -> Optional[str]:
     """
     Detect if text ends with a repeated pattern (repetition loop).

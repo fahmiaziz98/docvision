@@ -40,6 +40,7 @@ class ParserConfig:
     timeout: float = 300.0
     temperature: float = 0.1
     max_tokens: int = 2048
+    max_iterations: int = 3
 
     # Prompts
     system_prompt: Optional[str] = None
