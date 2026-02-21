@@ -1,7 +1,8 @@
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
-from unittest.mock import MagicMock, patch
-from pathlib import Path
 from PIL import Image
 
 from docvision.processing.image import ImageProcessor
@@ -9,11 +10,7 @@ from docvision.processing.image import ImageProcessor
 
 @pytest.fixture
 def processor():
-    return ImageProcessor(
-        render_zoom=1,
-        enable_rotate=False,
-        post_crop_max_size=500
-    )
+    return ImageProcessor(render_zoom=1, enable_rotate=False, post_crop_max_size=500)
 
 
 @pytest.fixture
@@ -37,7 +34,7 @@ class TestImageProcessor:
         assert len(b64) > 0
 
     def test_encode_to_base64_pil(self, processor):
-        img_pil = Image.new('RGB', (100, 100), color='red')
+        img_pil = Image.new("RGB", (100, 100), color="red")
         b64, mime = processor.encode_to_base64(img_pil)
         assert isinstance(b64, str)
         assert mime == "image/jpeg"
@@ -54,23 +51,23 @@ class TestImageProcessor:
         mock_doc = MagicMock()
         mock_page = MagicMock()
         mock_pix = MagicMock()
-        
+
         # Setup page return
         mock_doc.load_page.return_value = mock_page
         mock_doc.__len__.return_value = 1
-        
+
         # Setup pixmap
-        mock_pix.samples = b'\x00' * (100 * 100 * 3)
+        mock_pix.samples = b"\x00" * (100 * 100 * 3)
         mock_pix.height = 100
         mock_pix.width = 100
         mock_pix.n = 3
-        
+
         mock_page.get_pixmap.return_value = mock_pix
         mock_fitz_open.return_value = mock_doc
 
         with patch("pathlib.Path.exists", return_value=True):
             images = processor.pdf_to_images("dummy.pdf")
-            
+
             assert len(images) == 1
             assert isinstance(images[0], np.ndarray)
             mock_fitz_open.assert_called_with(Path("dummy.pdf"))

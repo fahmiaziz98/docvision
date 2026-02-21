@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
-from docvision.processing.rotate import AutoRotate
+
 from docvision.core.types import RotationAngle, RotationResult
+from docvision.processing.rotate import AutoRotate
 
 
 @pytest.mark.unit
@@ -15,9 +16,9 @@ class TestAutoRotate:
         # Create a blank square image
         img = np.zeros((100, 100, 3), dtype=np.uint8)
         rotator = AutoRotate()
-        
+
         rotated_img, result = rotator.auto_rotate(img)
-        
+
         assert isinstance(rotated_img, np.ndarray)
         assert isinstance(result, RotationResult)
         # For a blank image, it should typically return NONE

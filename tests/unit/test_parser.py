@@ -1,4 +1,3 @@
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -46,9 +45,7 @@ def parser(mock_vlm_client, mock_image_processor):
         patch("docvision.core.parser.ImageProcessor", return_value=mock_image_processor),
     ):
         p = DocumentParser(
-            vlm_base_url="https://api.test.com",
-            vlm_model="test-model",
-            vlm_api_key="test-key"
+            vlm_base_url="https://api.test.com", vlm_model="test-model", vlm_api_key="test-key"
         )
         # Inject mocks directly to ensure they are used
         p._client = mock_vlm_client
@@ -62,44 +59,42 @@ class TestDocumentParser:
     async def test_parse_image(self, parser, mock_vlm_client):
         # Create a dummy image array
         img_array = np.zeros((100, 100, 3), dtype=np.uint8)
-        
+
         # Mock _load_image to avoid CV2 dependency on non-existent file
-        with patch.object(parser, '_load_image', return_value=img_array):
+        with patch.object(parser, "_load_image", return_value=img_array):
             result = await parser.parse_image("test_image.jpg")
-            
+
             assert isinstance(result, ParseResult)
             assert result.content == "Extracted text content"
             assert "file_name" in result.metadata
             assert result.metadata["file_name"] == "test_image.jpg"
-            
+
             # Verify client was called
             mock_vlm_client.invoke.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_parse_pdf_vlm_mode(self, parser, mock_vlm_client):
         pdf_path = "test.pdf"
-        
+
         # Mock PDF info and page processing
         with (
             patch("pathlib.Path.exists", return_value=True),
             patch("pdfplumber.open") as mock_pdf_open,
-            patch.object(parser, '_process_page_vlm') as mock_process_vlm
+            patch.object(parser, "_process_page_vlm") as mock_process_vlm,
         ):
             # Mock PDF page count
             mock_pdf = MagicMock()
             mock_pdf.pages = [MagicMock()]
             mock_pdf_open.return_value.__enter__.return_value = mock_pdf
-            
+
             # Mock result
             mock_result = ParseResult(
-                id="test-id",
-                content="Page content",
-                metadata={"page_number": 1}
+                id="test-id", content="Page content", metadata={"page_number": 1}
             )
             mock_process_vlm.return_value = mock_result
-            
+
             results = await parser.parse_pdf(pdf_path, parsing_mode=ParsingMode.VLM)
-            
+
             assert len(results) == 1
             assert results[0].content == "Page content"
             assert results[0].metadata["page_number"] == 1
@@ -107,7 +102,7 @@ class TestDocumentParser:
     @pytest.mark.asyncio
     async def test_parse_image_agentic_mode_fallback(self, parser):
         # Current implementation of parse_image doesn't seem to have a parsing_mode arg
-        # But let's check if it should. Wait, looking at parser.py, 
+        # But let's check if it should. Wait, looking at parser.py,
         # parse_image ALWAYS calls _call_vlm which is single-shot unless it's in a DIFFERENT method.
         # Oh, I see _process_page_agentic in parser.py but parse_image doesn't use it?
         pass
@@ -116,12 +111,12 @@ class TestDocumentParser:
     async def test_structured_output(self, parser, mock_vlm_client):
         class TestModel(BaseModel):
             field: str
-            
+
         img_array = np.zeros((100, 100, 3), dtype=np.uint8)
-        
-        with patch.object(parser, '_load_image', return_value=img_array):
+
+        with patch.object(parser, "_load_image", return_value=img_array):
             await parser.parse_image("test.jpg", output_schema=TestModel)
-            
+
             # Check if output_schema was passed to internal call
             args, kwargs = mock_vlm_client.invoke.call_args
-            assert kwargs['output_schema'] == TestModel
+            assert kwargs["output_schema"] == TestModel
