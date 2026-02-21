@@ -7,10 +7,7 @@ import cv2
 import fitz
 import numpy as np
 from PIL import Image
-from tqdm import tqdm
 
-from ..core.types import ImageFormat, ParserConfig
-from .crop import ContentCropper
 from .rotate import AutoRotate
 
 
@@ -20,31 +17,28 @@ class ImageProcessor:
     cropping, resizing, and encoding.
     """
 
-    def __init__(self, config: Optional[ParserConfig] = None):
+    def __init__(
+        self,
+        render_zoom: int = 2,
+        enable_rotate: bool = True,
+        post_crop_max_size: int = 1024,
+        debug_dir: Optional[Union[str, Path]] = None,
+    ):
         """
         Initialize the ImageProcessor with configuration.
 
         Args:
-            config: Configuration object. If None, default ParserConfig is used.
+            render_zoom: Zoom level for PDF rendering.
+            enable_rotate: Whether to enable auto-rotation.
+            post_crop_max_size: Maximum size for post-cropping.
+            debug_dir: Directory for saving debug images.
         """
-        self.config = config or ParserConfig()
+        self.render_zoom = render_zoom
+        self.enable_rotate = enable_rotate
+        self.post_crop_max_size = post_crop_max_size
+        self.debug_dir = debug_dir
 
-        self.rotation_pipeline = None
-        if self.config.enable_auto_rotate:
-            self.rotation_pipeline = AutoRotate(
-                hough_threshold=self.config.hough_threshold,
-                min_score_diff=self.config.min_score_diff,
-                analysis_max_size=self.config.analysis_max_size,
-                use_aspect_ratio_fallback=self.config.use_aspect_ratio_fallback,
-                aggressive_mode=self.config.aggressive_mode,
-            )
-        self.cropper = None
-        if self.config.enable_crop:
-            self.cropper = ContentCropper(
-                padding=self.config.crop_padding,
-                ignore_bottom_percent=self.config.crop_ignore_bottom_percent,
-                max_crop_percent=self.config.crop_max_crop_percent,
-            )
+        self.rotation_pipeline = AutoRotate(aggressive_mode=True)
 
     def pdf_to_images(
         self,
@@ -78,14 +72,12 @@ class ImageProcessor:
             end_page = min(total_pages, end_page or total_pages)
 
             page_iterator = range(start_page, end_page + 1)
-            if self.config.progress_callback is None:
-                page_iterator = tqdm(page_iterator, desc="Converting PDF to images")
 
             images = []
             for page_num in page_iterator:
                 page = doc.load_page(page_num - 1)
                 pix = page.get_pixmap(
-                    matrix=fitz.Matrix(self.config.render_zoom, self.config.render_zoom),
+                    matrix=fitz.Matrix(self.render_zoom, self.render_zoom),
                     alpha=False,
                 )
                 img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
@@ -123,24 +115,15 @@ class ImageProcessor:
             img_np = np.array(image)
 
         try:
-            if self.config.enable_auto_rotate:
+            if self.enable_rotate:
                 img_np, rotation_result = self.rotation_pipeline.auto_rotate(img_np)
-
-            if self.config.enable_crop:
-                img_np = self.cropper.crop(img_np)
 
             img_np = self._resize_image(img_np)
 
-            if self.config.debug_save_path:
-                doc_name = (
-                    f"processed_page_{page_num}" if page_num is not None else "processed_image"
-                )
+            if self.debug_dir:
                 self._save_images(
                     [img_np],
-                    self.config.debug_save_path,
-                    doc_name,
-                    ImageFormat.JPEG,
-                    self.config.jpeg_quality,
+                    doc_name=f"image_{page_num}",
                 )
 
             return img_np
@@ -164,8 +147,8 @@ class ImageProcessor:
         else:
             h, w = image.size
 
-        if max(h, w) > self.config.post_crop_max_size:
-            scale = self.config.post_crop_max_size / max(h, w)
+        if max(h, w) > self.post_crop_max_size:
+            scale = self.post_crop_max_size / max(h, w)
             new_w = int(w * scale)
             new_h = int(h * scale)
             image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
@@ -175,9 +158,8 @@ class ImageProcessor:
     def _save_images(
         self,
         images: List[Union[np.ndarray, Image.Image]],
-        output_dir: Union[str, Path],
         doc_name: str = "images",
-        img_format: ImageFormat = ImageFormat.JPEG,
+        img_format: str = "JPEG",
         quality: int = 95,
     ) -> List[str]:
         """
@@ -193,15 +175,12 @@ class ImageProcessor:
         Returns:
             A list of paths where the images were saved.
         """
-        output_dir = Path(output_dir)
+        output_dir = Path(self.debug_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         saved_paths = []
         for i, image in enumerate(images):
-            if "page" in doc_name:
-                filename = f"{doc_name}.{img_format.lower()}"
-            else:
-                filename = f"{doc_name}_page_{i}.{img_format.lower()}"
+            filename = f"{doc_name}_{i}.{img_format.lower()}"
 
             path = output_dir / filename
             if isinstance(image, np.ndarray):
@@ -215,7 +194,7 @@ class ImageProcessor:
     @staticmethod
     def encode_to_base64(
         image: Union[np.ndarray, Image.Image],
-        img_format: ImageFormat = ImageFormat.JPEG,
+        img_format: str = "JPEG",
         quality: int = 95,
     ) -> Tuple[str, str]:
         """

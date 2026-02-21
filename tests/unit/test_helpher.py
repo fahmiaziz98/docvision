@@ -78,19 +78,19 @@ Line 3
         assert "Line 3" in result
 
     def test_no_tags(self):
-        """Should return None when no tags present."""
+        """Should return original text when no tags present."""
         text = "No tags here, just plain text"
-        assert extract_transcription(text) is None
+        assert extract_transcription(text) == text
 
     def test_incomplete_opening_tag(self):
-        """Should return None for incomplete opening tag."""
+        """Should return original text for incomplete opening tag."""
         text = "<transcriptioncontent but no closing tag"
-        assert extract_transcription(text) is None
+        assert extract_transcription(text) == text
 
     def test_incomplete_closing_tag(self):
-        """Should return None for incomplete closing tag."""
+        """Should return original text for incomplete closing tag."""
         text = "<transcription>content but no closing tag"
-        assert extract_transcription(text) is None
+        assert extract_transcription(text) == text
 
     def test_strips_whitespace(self):
         """Should strip leading/trailing whitespace."""

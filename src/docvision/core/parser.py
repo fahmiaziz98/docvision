@@ -1,444 +1,494 @@
 import asyncio
+import json
 import time
+from dataclasses import asdict
 from pathlib import Path
-from typing import Optional, Type, Union
+from typing import Any, Dict, List, Optional, Type, Union
 
 import numpy as np
-from PIL import Image
+import pdfplumber
 from pydantic import BaseModel
-from tqdm import tqdm
-from tqdm.asyncio import tqdm as atqdm
 
-from ..processing.image import ImageProcessor
-from ..workflows import AgenticWorkflow
-from ..workflows.prompts import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
+from ..processing import AutoRotate, ImageProcessor, NativePDFParser
+from ..utils.helper import extract_transcription
+from ..workflows.graph import AgenticWorkflow
 from .client import VLMClient
-from .types import BatchParseResult, ParserConfig, ParseResult, ParsingMode
+from .types import DocumentMetadata, ParseResult, ParsingMode
 
 
-class DocumentParsingAgent:
+class DocumentParser:
     """
-    Production-ready document parser using Vision Language Models.
-
-    Supports two parsing modes:
-    - VLM: Fast single-shot parsing (default)
-    - AGENTIC: Self-correcting multi-turn workflow for maximum quality
-
-    Attributes:
-        config: Unified configuration for parser and image processing.
-        processor: ImageProcessor instance for PDF/Image handling.
+    A high-level parser for documents (PDFs and Images) using a combination
+    of native extraction and Vision Language Models (VLMs).
     """
 
-    def __init__(self, config: Optional[ParserConfig] = None):
+    def __init__(
+        self,
+        vlm_base_url: Optional[str] = None,
+        vlm_model: Optional[str] = None,
+        vlm_api_key: Optional[str] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        max_iterations: int = 3,
+        system_prompt: Optional[str] = None,
+        chart_description: bool = False,
+        enable_rotate: bool = True,
+        render_zoom: float = 2.0,
+        post_crop_max_size: int = 1024,
+        max_concurrency: int = 5,
+        debug_dir: Optional[Union[str, Path]] = None,
+    ):
         """
-        Initialize the DocumentParsingAgent.
+        Initialize the DocumentParser.
 
         Args:
-            config: ParserConfig instance with all settings.
-                    If None, uses default configuration.
+            vlm_base_url: Base URL for the VLM API.
+            vlm_model: Model name to use for vision tasks.
+            vlm_api_key: API key for the VLM service.
+            temperature: Sampling temperature for VLM calls.
+            max_tokens: Maximum tokens to generate per call.
+            max_iterations: Maximum number of iterations for agentic parsing.
+            system_prompt: System prompt to use for VLM calls.
+            chart_description: Whether to use VLM to describe charts/images in PDFs.
+            enable_rotate: Whether to automatically correct image orientation.
+            max_concurrency: Maximum number of pages to process concurrently.
         """
-        self.config = config or ParserConfig()
+        self.max_concurrency = max_concurrency
+        if vlm_base_url is None or vlm_model is None or vlm_api_key is None:
+            self._client = None
+        else:
+            self._client = VLMClient(
+                base_url=vlm_base_url,
+                api_key=vlm_api_key,
+                model_name=vlm_model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        self.system_prompt = system_prompt
 
-        # Set default prompts if not provided
-        if self.config.system_prompt is None:
-            self.config.system_prompt = DEFAULT_SYSTEM_PROMPT
-        if self.config.user_prompt is None:
-            self.config.user_prompt = DEFAULT_USER_PROMPT
-
-        self._vlm_client = VLMClient(
-            base_url=self.config.base_url,
-            api_key=self.config.api_key or "EMPTY",
-            model_name=self.config.model_name,
-            timeout=int(self.config.timeout),
-            max_tokens=self.config.max_tokens,
-            temperature=self.config.temperature,
-            max_retries=3,
-            retry_delay=2.0,
+        self._agentic_workflow = (
+            AgenticWorkflow(
+                vlm_client=self._client,
+                system_prompt=system_prompt,
+                max_iterations=max_iterations,
+            )
+            if self._client
+            else None
         )
 
-        self.processor = ImageProcessor(config=self.config)
+        self._rotate = AutoRotate(aggressive_mode=True) if enable_rotate else None
+        self._image_processor = ImageProcessor(
+            render_zoom=render_zoom,
+            enable_rotate=enable_rotate,
+            post_crop_max_size=post_crop_max_size,
+            debug_dir=debug_dir,
+        )
+        self._pdf_parser = NativePDFParser(
+            vlm_client=self._client,
+            image_processor=self._image_processor,
+            chart_description=chart_description,
+        )
 
-        self._agentic_workflow = None
-
-    def _get_agentic_workflow(self) -> AgenticWorkflow:
-        """Lazy initialization of agentic workflow."""
-        if self._agentic_workflow is None:
-            self._agentic_workflow = AgenticWorkflow(
-                vlm_client=self._vlm_client,
-                system_prompt=self.config.system_prompt,
-                user_prompt=self.config.user_prompt,
-                max_iterations=self.config.max_iterations,
-            )
-        return self._agentic_workflow
-
-    def parse_image(
+    async def parse_image(
         self,
-        image: Union[str, Path, Image.Image],
-        mode: ParsingMode = ParsingMode.VLM,
+        image: Union[str, Path, np.ndarray],
+        metadata: Optional[Union[Dict[str, Any], DocumentMetadata]] = None,
+        save_path: Optional[Union[str, Path]] = None,
         output_schema: Optional[Type[BaseModel]] = None,
     ) -> ParseResult:
         """
-        Parse a single image (Synchronous).
+        Parse a single image into Markdown or JSON using a VLM.
 
         Args:
-            image: Path to image file or PIL Image object.
-            mode: Parsing mode (VLM or AGENTIC).
-            output_schema: Optional Pydantic model for structured output (VLM mode only).
+            image: Image source (path or numpy BGR array).
+            metadata: Optional metadata to attach to the result.
+            save_path: Optional path to save the ParseResult.
+            output_schema: Optional Pydantic model for structured output parsing.
 
         Returns:
-            A ParseResult object containing the output and metadata.
+            A ParseResult containing the extracted text and metadata.
         """
-        if mode == ParsingMode.AGENTIC:
-            raise NotImplementedError("Agentic mode requires async. Use aparse_image() instead.")
+        start_time = time.time()
 
-        if output_schema and mode == ParsingMode.AGENTIC:
-            raise ValueError("output_schema is only supported in VLM mode")
+        img_array = await asyncio.to_thread(self._load_image, image)
+
+        doc_metadata: Dict[str, Any] = {}
+        if isinstance(image, (str, Path)):
+            doc_metadata["file_name"] = Path(image).name
+
+        if isinstance(metadata, dict):
+            doc_metadata.update(metadata)
+        elif isinstance(metadata, DocumentMetadata):
+            doc_metadata.update(asdict(metadata))
+
+        if self._client is None:
+            raise ValueError(
+                "You must provide VLM_BASE_URL, VLM_API_KEY & VLM_MODEL, when parsing images"
+            )
+
+        if self._rotate:
+            img_array, _ = self._rotate.auto_rotate(img_array)
+
+        parse_result = await self._call_vlm(img_array, doc_metadata, output_schema=output_schema)
+
+        duration = time.time() - start_time
+        doc_metadata["processing_time"] = duration
+
+        if save_path:
+            self._save_results([parse_result], save_path)
+
+        return parse_result
+
+    async def parse_pdf(
+        self,
+        pdf_path: Union[str, Path],
+        parsing_mode: ParsingMode = ParsingMode.PDF,
+        start_page: Optional[int] = None,
+        end_page: Optional[int] = None,
+        save_path: Optional[Union[str, Path]] = None,
+        metadata: Optional[Union[Dict[str, Any], DocumentMetadata]] = None,
+    ) -> List[ParseResult]:
+        """
+        Parse a PDF file page-by-page.
+
+        Args:
+            pdf_path: Path to the PDF document.
+            parsing_mode: ParsingMode to use.
+            start_page: First page to parse (1-indexed).
+            end_page: Last page to parse (inclusive).
+            save_path: Directory to save the results as a JSON or MD file.
+            metadata: Optional base metadata to clone for each page.
+
+        Returns:
+            List of ParseResult objects.
+        """
+        path = Path(pdf_path)
+        if not path.exists():
+            raise FileNotFoundError(f"PDF file not found: {path}")
+
+        if parsing_mode != ParsingMode.PDF and self._client is None:
+            raise ValueError(
+                f"You must provide VLM_BASE_URL, VLM_API_KEY & VLM_MODEL, when parsing using {parsing_mode.name}"
+            )
+
+        # Prepare base metadata
+        base_metadata: Dict[str, Any] = {"file_name": path.name}
+        if isinstance(metadata, dict):
+            base_metadata.update(metadata)
+        elif isinstance(metadata, DocumentMetadata):
+            base_metadata.update(asdict(metadata))
+
+        try:
+
+            def _get_pdf_info(p: Path):
+                with pdfplumber.open(p) as pdf:
+                    return len(pdf.pages)
+
+            total_pages = await asyncio.to_thread(_get_pdf_info, path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to open PDF {path.name}: {e}")
+
+        base_metadata["total_pages"] = total_pages
+
+        _start = start_page or 1
+        _end = min(end_page or total_pages, total_pages)
+        pages = range(_start, _end + 1)
+
+        results: List[ParseResult] = []
+        semaphore = asyncio.Semaphore(self.max_concurrency)
+
+        async def _process_page_with_semaphore(page_n: int, meta: Dict[str, Any]):
+            async with semaphore:
+                if parsing_mode == ParsingMode.PDF:
+                    return await self._process_page(path, page_n, meta)
+                elif parsing_mode == ParsingMode.VLM:
+                    return await self._process_page_vlm(path, page_n, meta)
+                elif parsing_mode == ParsingMode.AGENTIC:
+                    return await self._process_page_agentic(path, page_n, meta)
+                else:
+                    raise ValueError(f"Parsing mode: {parsing_mode} not supported")
+
+        import copy
+
+        from tqdm.asyncio import tqdm
+
+        tasks = [
+            _process_page_with_semaphore(page_num, copy.deepcopy(base_metadata))
+            for page_num in pages
+        ]
+
+        for coro in tqdm(
+            asyncio.as_completed(tasks), total=len(tasks), desc=f"Parsing {path.name}", unit="page"
+        ):
+            try:
+                res = await coro
+                if res:
+                    results.append(res)
+            except Exception as e:
+                print(f"Error processing a page: {e}")
+
+        results.sort(key=lambda x: x.metadata.get("page_number", 0))
+
+        if save_path and results:
+            self._save_results(results, save_path, path.stem)
+
+        return results
+
+    def _save_results(
+        self,
+        results: List[ParseResult],
+        save_path: Union[str, Path],
+        default_stem: str = "output",
+    ) -> None:
+        """
+        Save results to either a JSON or MD file.
+        """
+        save_path_obj = Path(save_path)
+        suffix = save_path_obj.suffix.lower()
+
+        is_json = suffix == ".json"
+        is_md = suffix == ".md"
+
+        if is_json or is_md:
+            target_path = save_path_obj
+            save_dir = target_path.parent
+        else:
+            save_dir = save_path_obj
+            target_path = save_dir / f"{default_stem}.json"
+            is_json = True
+
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        if is_json:
+            save_data = []
+            for r in results:
+                try:
+                    if isinstance(r.content, str) and (
+                        r.content.strip().startswith("{") or r.content.strip().startswith("[")
+                    ):
+                        content_json = json.loads(r.content)
+                        item = asdict(r)
+                        item["content"] = content_json
+                        save_data.append(item)
+                    else:
+                        save_data.append(asdict(r))
+                except Exception:
+                    save_data.append(asdict(r))
+
+            with open(target_path, "w", encoding="utf-8") as f:
+                if len(save_data) == 1 and isinstance(save_data[0]["content"], (dict, list)):
+                    json.dump(save_data[0]["content"], f, indent=2, ensure_ascii=False)
+                else:
+                    json.dump(save_data, f, indent=2, ensure_ascii=False)
+        elif is_md:
+            with open(target_path, "w", encoding="utf-8") as f:
+                content = "\n\n---\n\n".join(r.content for r in results)
+                f.write(content)
+
+    async def _process_page_agentic(
+        self,
+        pdf_path: Path,
+        page_num: int,
+        metadata: Dict[str, Any],
+    ) -> Optional[ParseResult]:
+        """
+        Process a single PDF page using the Agentic workflow.
+        """
+        if not self._agentic_workflow:
+            raise RuntimeError("Agentic workflow is not initialized.")
 
         start_time = time.time()
 
-        if isinstance(image, (str, Path)):
-            image = Image.open(image)
+        def _convert_pdf_to_images():
+            return self._image_processor.pdf_to_images(
+                str(pdf_path),
+                start_page=page_num,
+                end_page=page_num,
+            )
 
-        processed_img = self.processor.process_image(image)
-
-        img_b64, mime_type = ImageProcessor.encode_to_base64(
-            processed_img, self.config.image_format, self.config.jpeg_quality
+        images = await asyncio.to_thread(_convert_pdf_to_images)
+        img = await asyncio.to_thread(
+            self._image_processor.process_image, images[0], page_num=page_num
         )
 
-        response = self._vlm_client.call(
-            img_b64,
-            mime_type,
-            self.config.system_prompt,
-            self.config.user_prompt,
+        def _encode_image():
+            return self._image_processor.encode_to_base64(img)
+
+        img_b64, mime_type = await asyncio.to_thread(_encode_image)
+
+        state = await self._agentic_workflow.run(
+            image_b64=img_b64,
+            mime_type=mime_type,
+        )
+
+        content = state.get("accumulated_text", "")
+
+        duration = time.time() - start_time
+        metadata["page_number"] = page_num
+        metadata["processing_time"] = duration
+        metadata["agent_iterations"] = state.get("iteration_count", 0)
+
+        if not content.strip():
+            return None
+
+        return ParseResult(
+            id=self._generate_id(content),
+            content=content,
+            metadata=metadata,
+        )
+
+    async def _process_page(
+        self,
+        pdf_path: Path,
+        page_num: int,
+        metadata: Dict[str, Any],
+    ) -> Optional[ParseResult]:
+        """
+        Process a single PDF page using the standard PDF parser.
+
+        Args:
+            pdf_path: Path to the PDF file.
+            page_num: The page number to process.
+            metadata: Metadata to associate with the page.
+
+        Returns:
+            The parsed result if content is found, otherwise None.
+        """
+        start_time = time.time()
+
+        result = await self._pdf_parser.aparse_page(str(pdf_path), page_num)
+        page_content = result.markdown
+
+        duration = time.time() - start_time
+        metadata["page_number"] = page_num
+        metadata["processing_time"] = duration
+
+        if not page_content.strip():
+            return None
+
+        return ParseResult(
+            id=self._generate_id(page_content),
+            content=page_content,
+            metadata=metadata,
+        )
+
+    async def _process_page_vlm(
+        self,
+        pdf_path: Path,
+        page_num: int,
+        metadata: Dict[str, Any],
+        output_schema: Optional[Type[BaseModel]] = None,
+    ) -> Optional[ParseResult]:
+        """
+        Process a single PDF page using a Vision Language Model (VLM).
+
+        Args:
+            pdf_path: Path to the PDF file.
+            page_num: The page number to process.
+            metadata: Metadata associated with the document.
+
+        Returns:
+            A list of ParseResult objects if successful, None otherwise.
+        """
+        start_time = time.time()
+
+        def _convert_pdf_to_images():
+            return self._image_processor.pdf_to_images(
+                str(pdf_path),
+                start_page=page_num,
+                end_page=page_num,
+            )
+
+        images = await asyncio.to_thread(_convert_pdf_to_images)
+
+        img = await asyncio.to_thread(
+            self._image_processor.process_image, images[0], page_num=page_num
+        )
+        result = await self._call_vlm(img, metadata, output_schema=output_schema)
+
+        duration = time.time() - start_time
+        metadata["page_number"] = page_num
+        metadata["processing_time"] = duration
+
+        if not result:
+            return None
+
+        return result
+
+    def _load_image(self, image: Union[str, Path, np.ndarray]) -> np.ndarray:
+        """
+        Load an image from path or return the array if already loaded.
+
+        Args:
+            image: path or image numpy array
+
+        Returns:
+            image numpy arra
+        """
+        import cv2
+
+        if isinstance(image, (str, Path)):
+            img = cv2.imread(str(image))
+            if img is None:
+                raise FileNotFoundError(f"Could not load image: {image}")
+            return img
+        return image
+
+    async def _call_vlm(
+        self,
+        image: np.ndarray,
+        metadata: Dict[str, Any],
+        output_schema: Optional[Type[BaseModel]] = None,
+    ) -> ParseResult:
+        """
+        Internal method to handle the VLM communication.
+
+        Args:
+            image: image numpy array
+            metadata: metadata image
+
+        Returns:
+            Parsing results
+        """
+
+        def _encode_image():
+            return self._image_processor.encode_to_base64(image)
+
+        img_b64, mime_type = await asyncio.to_thread(_encode_image)
+
+        response = await self._client.invoke(
+            image_b64=img_b64,
+            mime_type=mime_type,
+            system_prompt=self.system_prompt,
             output_schema=output_schema,
         )
 
-        content = response.choices[0].message.content if response and response.choices else ""
-        processing_time = time.time() - start_time
-
-        # Get image size from numpy array
-        img_size = (
-            (processed_img.shape[1], processed_img.shape[0])
-            if isinstance(processed_img, np.ndarray)
-            else processed_img.size
-        )
-
-        return ParseResult(
-            content=content,
-            page_number=0,
-            processing_time=processing_time,
-            metadata={
-                "image_size": img_size,
-                "mime_type": mime_type,
-                "mode": mode.value,
-                "structured": bool(output_schema),
-            },
-        )
-
-    def parse_pdf(
-        self,
-        pdf_path: Union[str, Path],
-        mode: ParsingMode = ParsingMode.VLM,
-        start_page: Optional[int] = None,
-        end_page: Optional[int] = None,
-        output_schema: Optional[Type[BaseModel]] = None,
-    ) -> BatchParseResult:
-        """
-        Parse a PDF document page by page (Synchronous).
-
-        Args:
-            pdf_path: Path to the PDF file.
-            mode: Parsing mode (VLM or AGENTIC).
-            start_page: First page index to parse (1-indexed).
-            end_page: Last page index to parse (1-indexed).
-            output_schema: Optional Pydantic model for structured output (VLM mode only).
-
-        Returns:
-            A BatchParseResult containing results for all pages.
-        """
-        if mode == ParsingMode.AGENTIC:
-            raise NotImplementedError("Agentic mode requires async. Use aparse_pdf() instead.")
-
-        if output_schema and mode == ParsingMode.AGENTIC:
-            raise ValueError("output_schema is only supported in VLM mode")
-
-        batch_start = time.time()
-
-        images = self.processor.pdf_to_images(pdf_path, start_page, end_page)
-        total_pages = len(images)
-
-        results = []
-        errors = []
-        success_count = 0
-
-        for idx, img in tqdm(enumerate(images), total=total_pages, desc="Processing pages"):
-            page_num = (start_page or 1) + idx
-
-            try:
-                processed_img = self.processor.process_image(img, page_num=page_num)
-                img_b64, mime_type = ImageProcessor.encode_to_base64(
-                    processed_img, self.config.image_format, self.config.jpeg_quality
-                )
-
-                page_start = time.time()
-                response = self._vlm_client.call(
-                    img_b64,
-                    mime_type,
-                    self.config.system_prompt,
-                    self.config.user_prompt,
-                    output_schema=output_schema,
-                )
-
-                content = (
-                    response.choices[0].message.content if response and response.choices else ""
-                )
-                processing_time = time.time() - page_start
-
-                # Get image size from numpy array
-                img_size = (
-                    (processed_img.shape[1], processed_img.shape[0])
-                    if isinstance(processed_img, np.ndarray)
-                    else processed_img.size
-                )
-
-                result = ParseResult(
-                    content=content,
-                    page_number=page_num,
-                    processing_time=processing_time,
-                    metadata={
-                        "image_size": img_size,
-                        "mime_type": mime_type,
-                        "mode": mode.value,
-                        "structured": bool(output_schema),
-                    },
-                )
-
-                results.append(result)
-                success_count += 1
-
-            except Exception as e:
-                errors.append({"page": page_num, "error": str(e), "type": type(e).__name__})
-
-        total_time = time.time() - batch_start
-
-        return BatchParseResult(
-            results=results,
-            total_pages=total_pages,
-            total_time=total_time,
-            success_count=success_count,
-            error_count=len(errors),
-            errors=errors,
-        )
-
-    async def aparse_image(
-        self,
-        image: Union[str, Path, Image.Image],
-        mode: ParsingMode = ParsingMode.VLM,
-        output_schema: Optional[Type[BaseModel]] = None,
-    ) -> ParseResult:
-        """
-        Parse a single image (Asynchronous).
-
-        Args:
-            image: Path to image file or PIL Image object.
-            mode: Parsing mode (VLM or AGENTIC).
-            output_schema: Optional Pydantic model for structured output (VLM mode only).
-
-        Returns:
-            A ParseResult object.
-        """
-        if mode == ParsingMode.AGENTIC and output_schema is not None:
-            raise ValueError("output_schema is only supported in VLM mode")
-
-        start_time = time.time()
-
-        if isinstance(image, (str, Path)):
-            image = Image.open(image)
-
-        processed_img = self.processor.process_image(image)
-
-        img_b64, mime_type = ImageProcessor.encode_to_base64(
-            processed_img, self.config.image_format, self.config.jpeg_quality
-        )
-
-        if mode == ParsingMode.VLM:
-            response = await self._vlm_client.acall(
-                img_b64,
-                mime_type,
-                self.config.system_prompt,
-                self.config.user_prompt,
-                output_schema=output_schema,
-            )
-            content = response.choices[0].message.content if response and response.choices else ""
-            iterations = 1
-            generation_history = []
-
-        elif mode == ParsingMode.AGENTIC:
-            workflow = self._get_agentic_workflow()
-            result = await workflow.run(img_b64, mime_type)
-            content = result["accumulated_text"]
-            iterations = result["iteration_count"]
-            generation_history = result["generation_history"]
-
-        else:
-            raise ValueError(f"Invalid parsing mode: {mode}")
-
-        processing_time = time.time() - start_time
-
-        # Get image size from numpy array
-        img_size = (
-            (processed_img.shape[1], processed_img.shape[0])
-            if isinstance(processed_img, np.ndarray)
-            else processed_img.size
-        )
-
-        return ParseResult(
-            content=content,
-            page_number=0,
-            processing_time=processing_time,
-            metadata={
-                "image_size": img_size,
-                "mime_type": mime_type,
-                "mode": mode.value,
-                "iterations": iterations,
-                "generation_history": generation_history,
-                "structured": bool(output_schema),
-            },
-        )
-
-    async def aparse_pdf(
-        self,
-        pdf_path: Union[str, Path],
-        mode: ParsingMode = ParsingMode.VLM,
-        start_page: Optional[int] = None,
-        end_page: Optional[int] = None,
-        output_schema: Optional[Type[BaseModel]] = None,
-        max_concurrent: int = 3,
-    ) -> BatchParseResult:
-        """
-        Parse a PDF document with optional concurrency (Asynchronous).
-
-        Args:
-            pdf_path: Path to the PDF file.
-            mode: Parsing mode (VLM or AGENTIC).
-            start_page: First page index to parse (1-indexed).
-            end_page: Last page index to parse (1-indexed).
-            output_schema: Optional Pydantic model for structured output (VLM mode only).
-            max_concurrent: Maximum number of concurrent page parsing tasks.
-
-        Returns:
-            A BatchParseResult object.
-        """
-        if mode == ParsingMode.AGENTIC and output_schema is not None:
-            raise ValueError("output_schema is only supported in VLM mode")
-
-        batch_start = time.time()
-
-        images = self.processor.pdf_to_images(pdf_path, start_page, end_page)
-        total_pages = len(images)
-
-        results = []
-        errors = []
-
-        semaphore = asyncio.Semaphore(max_concurrent)
-
-        workflow = self._get_agentic_workflow() if mode == ParsingMode.AGENTIC else None
-
-        async def process_page(idx: int, img: np.ndarray):
-            page_num = (start_page or 1) + idx
-
-            async with semaphore:
-                try:
-                    processed_img = self.processor.process_image(img, page_num=page_num)
-                    img_b64, mime_type = ImageProcessor.encode_to_base64(
-                        processed_img, self.config.image_format, self.config.jpeg_quality
-                    )
-
-                    page_start = time.time()
-
-                    if mode == ParsingMode.VLM:
-                        response = await self._vlm_client.acall(
-                            img_b64,
-                            mime_type,
-                            self.config.system_prompt,
-                            self.config.user_prompt,
-                            output_schema=output_schema,
-                        )
-                        content = (
-                            response.choices[0].message.content
-                            if response and response.choices
-                            else ""
-                        )
-                        iterations = 1
-                        generation_history = []
-
-                    elif mode == ParsingMode.AGENTIC:
-                        result = await workflow.run(img_b64, mime_type)
-                        content = result["accumulated_text"]
-                        iterations = result["iteration_count"]
-                        generation_history = result["generation_history"]
-
-                    else:
-                        raise ValueError(f"Invalid mode: {mode.value}")
-
-                    processing_time = time.time() - page_start
-
-                    # Get image size from numpy array
-                    img_size = (
-                        (processed_img.shape[1], processed_img.shape[0])
-                        if isinstance(processed_img, np.ndarray)
-                        else processed_img.size
-                    )
-
-                    return ParseResult(
-                        content=content,
-                        page_number=page_num,
-                        processing_time=processing_time,
-                        metadata={
-                            "image_size": img_size,
-                            "mime_type": mime_type,
-                            "mode": mode.value,
-                            "iterations": iterations,
-                            "generation_history": generation_history,
-                            "structured": bool(output_schema),
-                        },
-                    )
-
-                except Exception as e:
-                    return {
-                        "error": True,
-                        "page": page_num,
-                        "message": str(e),
-                        "type": type(e).__name__,
-                    }
-
-        tasks = [process_page(idx, img) for idx, img in enumerate(images)]
-        page_results = []
-        for coro in atqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Processing pages"):
-            result = await coro
-            page_results.append(result)
-
-        page_results.sort(key=lambda x: x.page_number if isinstance(x, ParseResult) else x.get("page", 0))
-        
-        for result in page_results:
-            if isinstance(result, dict) and result.get("error"):
-                errors.append(
-                    {
-                        "page": result["page"],
-                        "error": result["message"],
-                        "type": result["type"],
-                    }
-                )
+        if output_schema:
+            parsed = response.choices[0].message.parsed
+            if hasattr(parsed, "model_dump_json"):
+                content = parsed.model_dump_json()
             else:
-                results.append(result)
+                content = json.dumps(parsed) if parsed is not None else ""
+        else:
+            content = (
+                response.choices[0].message.content.strip() if response and response.choices else ""
+            )
+            content = extract_transcription(content) or ""
 
-        total_time = time.time() - batch_start
-
-        return BatchParseResult(
-            results=results,
-            total_pages=total_pages,
-            total_time=total_time,
-            success_count=len(results),
-            error_count=len(errors),
-            errors=errors,
+        return ParseResult(
+            id=self._generate_id(content),
+            content=content,
+            metadata=metadata,
         )
+
+    @staticmethod
+    def _generate_id(text: str) -> str:
+        """
+        Generate a unique SHA3-256 ID based on the content text.
+        """
+        import hashlib
+
+        if not isinstance(text, str):
+            text = str(text or "")
+
+        return hashlib.sha3_256(text.encode()).hexdigest()

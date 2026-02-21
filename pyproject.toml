@@ -31,6 +31,8 @@ dependencies = [
     "numpy>=2.0.2",
     "scipy>=1.11.0",
     "langgraph>=1.0.7",
+    "pdfplumber>=0.11.9",
+    "pydantic>=2.12.5",
 ]
 
 [dependency-groups]

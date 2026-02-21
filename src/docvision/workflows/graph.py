@@ -1,9 +1,9 @@
-from typing import TYPE_CHECKING, Dict, Literal, Optional
+from typing import Dict, Literal, Optional
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, RetryPolicy
 
-from ..core.client import VLMClient
+from ..core import CONTINUE_PROMPT, FIX_PROMPT, VLMClient
 from ..core.types import AgenticParseState
 from ..utils import (
     check_max_tokens_hit,
@@ -11,10 +11,6 @@ from ..utils import (
     extract_transcription,
     has_complete_transcription,
 )
-from .prompts import CONTINUE_PROMPT, FIX_PROMPT
-
-if TYPE_CHECKING:
-    from ..core.client import VLMClient
 
 MAX_ITERATIONS = 3
 
@@ -130,7 +126,7 @@ class AgenticWorkflow:
                 goto="complete",
             )
 
-        response = await self.vlm_client.acall(
+        response = await self.vlm_client.invoke(
             image_b64=state["image_b64"],
             mime_type=state["mime_type"],
             system_prompt=self.system_prompt,

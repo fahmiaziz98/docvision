@@ -70,7 +70,7 @@ def extract_transcription(text: str) -> Optional[str]:
     if match:
         return match.group(1).strip()
 
-    return None
+    return text.strip()
 
 
 def has_complete_transcription(text: str) -> bool:
