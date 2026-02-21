@@ -32,13 +32,13 @@ The framework provides three powerful parsing modes:
 Install using `pip`:
 
 ```bash
-pip install doc-vision-parser
+pip install docvision
 ```
 
 Or using `uv` (recommended):
 
 ```bash
-uv add doc-vision-parser
+uv add docvision
 ```
 
 ---
