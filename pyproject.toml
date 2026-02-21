@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "doc-vision-parser"
-version = "0.1.8"
+name = "docvision"
+version = "0.2.0"
 description = "Production-ready document parsing with Vision Language Models"
 readme = "README.md"
 requires-python = ">=3.10"
