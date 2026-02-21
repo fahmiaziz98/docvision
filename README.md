@@ -1,6 +1,6 @@
 # 📄 DocVision Parser
 
-> Production-ready document parsing framework powered by Vision Language Models (VLMs) and Native PDF extraction.
+> Framework document parsing powered by Vision Language Models (VLMs) and PDF extraction.
 
 [![Tests](https://github.com/fahmiaziz98/doc-vision-parser/workflows/Tests/badge.svg)](https://github.com/fahmiaziz98/doc-vision-parser/actions)
 [![PyPI version](https://badge.fury.io/py/doc-vision-parser.svg)](https://badge.fury.io/py/doc-vision-parser)
