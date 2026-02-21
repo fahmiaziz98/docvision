@@ -1,0 +1,56 @@
+{
+  "number": "CIV-000575",
+  "date": "8/15/2012",
+  "items": [
+    {
+      "name": "Mid-Range Speaker",
+      "quantity": 4,
+      "price": 480.0,
+      "amount": 1920.0
+    },
+    {
+      "name": "Mid-Range Speaker 2",
+      "quantity": 4,
+      "price": 500.0,
+      "amount": 2000.0
+    },
+    {
+      "name": "Acoustic Foam panel",
+      "quantity": 31,
+      "price": 37.0,
+      "amount": 1147.0
+    },
+    {
+      "name": "Standard Speaker",
+      "quantity": 5,
+      "price": 220.0,
+      "amount": 1100.0
+    },
+    {
+      "name": "Speaker cable 10",
+      "quantity": 13,
+      "price": 500.0,
+      "amount": 6500.0
+    },
+    {
+      "name": "Television M120 37\" Silver",
+      "quantity": 5,
+      "price": 350.0,
+      "amount": 1750.0
+    },
+    {
+      "name": "Projector Television",
+      "quantity": 16,
+      "price": 3750.0,
+      "amount": 60000.0
+    },
+    {
+      "name": "Surround Sound Receiver",
+      "quantity": 8,
+      "price": 450.0,
+      "amount": 3600.0
+    }
+  ],
+  "tax": 4681.02,
+  "total": 82698.02
+}
