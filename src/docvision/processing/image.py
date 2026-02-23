@@ -65,33 +65,30 @@ class ImageProcessor:
             start_page = 1
 
         try:
-            doc = fitz.open(pdf_path)
-            total_pages = len(doc)
+            with fitz.open(pdf_path) as doc:
+                total_pages = len(doc)
 
-            start_page = max(1, start_page)
-            end_page = min(total_pages, end_page or total_pages)
+                start_page = max(1, start_page)
+                end_page = min(total_pages, end_page or total_pages)
 
-            page_iterator = range(start_page, end_page + 1)
+                images = []
+                for page_num in range(start_page, end_page + 1):
+                    page = doc.load_page(page_num - 1)
+                    pix = page.get_pixmap(
+                        matrix=fitz.Matrix(self.render_zoom, self.render_zoom),
+                        alpha=False,
+                    )
+                    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                        (pix.height, pix.width, pix.n)
+                    )
 
-            images = []
-            for page_num in page_iterator:
-                page = doc.load_page(page_num - 1)
-                pix = page.get_pixmap(
-                    matrix=fitz.Matrix(self.render_zoom, self.render_zoom),
-                    alpha=False,
-                )
-                img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                    (pix.height, pix.width, pix.n)
-                )
+                    if pix.n == 4:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                    else:
+                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-                if pix.n == 4:
-                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-                else:
-                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                    images.append(img)
 
-                images.append(img)
-
-            doc.close()
             return images
         except Exception as e:
             raise RuntimeError(f"Failed to convert PDF to images: {e}")

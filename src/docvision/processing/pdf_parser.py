@@ -1,9 +1,9 @@
 import asyncio
 import re
-from typing import TYPE_CHECKING, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import pdfplumber
-from pdfplumber.page import Page
 
 from ..core import VLMClient
 from ..core.types import NativeParseResult, PageBlock
@@ -13,9 +13,26 @@ if TYPE_CHECKING:
     from .image import ImageProcessor
 
 
+@dataclass
+class _ExtractedPageData:
+    """
+    Holds all raw data extracted from a pdfplumber page WITHIN the context manager.
+    This is necessary because page objects become invalid after the PDF file is closed.
+    """
+
+    width: float
+    height: float
+    tables: List[dict]  # {"bbox": tuple, "data": list[list]}
+    text_bands: List[dict]  # {"bbox": tuple, "text": str}
+    images: List[dict]  # pdfplumber image dicts (x0, top, x1, bottom, ...)
+    chart_crops: List[
+        dict
+    ]  # {"bbox": tuple, "pil_image": PIL.Image, "width": float, "height": float}
+
+
 class NativePDFParser:
     """
-    Production-grade native PDF parser.
+    PDF parser.
 
     Combines deterministic pdfplumber extraction with optional VLM
     hybrid calls for chart/image description.
@@ -58,7 +75,11 @@ class NativePDFParser:
 
     async def aparse_page(self, pdf_path: str, page_num: int) -> NativeParseResult:
         """
-        Parse a single PDF page asynchronously (needed for VLM chart hybrid).
+        Parse a single PDF page asynchronously.
+
+        KEY FIX: All pdfplumber operations (including page.crop() for charts)
+        are completed INSIDE the context manager on a single thread.
+        Only the resulting data (numpy arrays, text, etc.) is returned.
 
         Args:
             pdf_path: Path to PDF file.
@@ -68,14 +89,14 @@ class NativePDFParser:
             NativeParseResult with markdown + metadata.
         """
         try:
+            # Step 1: Extract ALL data from pdfplumber in one thread, file stays open
+            # the entire time. chart_crops (PIL images) are also created here.
+            extracted = await asyncio.to_thread(self._extract_page_data, pdf_path, page_num)
 
-            def _open_and_extract_page(path: str, p_num: int):
-                with pdfplumber.open(path) as pdf:
-                    return pdf.pages[p_num - 1]
+            # Step 2: Now that file is closed, build blocks.
+            # For chart VLM calls, we use the PIL images captured in step 1.
+            blocks = await self._build_blocks_from_extracted(extracted)
 
-            page = await asyncio.to_thread(_open_and_extract_page, pdf_path, page_num)
-
-            blocks = await self._extract_blocks_async(page)
             return self._build_result(blocks, page_num)
         except Exception as e:
             return NativeParseResult(
@@ -115,61 +136,269 @@ class NativePDFParser:
             results.append(await self.aparse_page(pdf_path, p))
         return results
 
-    async def _extract_blocks_async(self, page: Page) -> list[PageBlock]:
-        """Extract all content blocks from a page (async — includes VLM chart calls)."""
-        blocks: list[PageBlock] = []
-
-        real_tables, table_bboxes = self._extract_real_tables(page)
-        blocks.extend(real_tables)
-
-        text_blocks = self._extract_text_blocks(page, table_bboxes)
-        for tb in text_blocks:
-            pseudo = self._detect_pseudo_table(tb)
-            blocks.append(pseudo if pseudo else tb)
-
-        # Async chart description via VLM
-        if self.chart_description:
-            chart_blocks = await self._extract_charts_with_vlm(page, table_bboxes)
-        else:
-            chart_blocks = self._extract_chart_placeholders(page, table_bboxes)
-        blocks.extend(chart_blocks)
-
-        blocks.sort(key=lambda b: b.y_top)
-        return blocks
-
-    def _extract_real_tables(self, page: Page) -> tuple[list[PageBlock], list[tuple]]:
+    def _extract_page_data(self, pdf_path: str, page_num: int) -> _ExtractedPageData:
         """
-        Extract pdfplumber-detected tables and return their bboxes
-        so text extraction can avoid duplicating content.
+        Extract all content blocks from a page (sync).
+
+        Args:
+            pdf_path: Path to PDF file.
+            page_num: Page number (1-indexed).
+
+        Returns:
+            _ExtractedPageData with all extracted content.
         """
-        blocks = []
-        table_bboxes = []
+        with pdfplumber.open(pdf_path) as pdf:
+            page = pdf.pages[page_num - 1]
+            width = page.width
+            height = page.height
 
-        found_tables = page.find_tables()
-        extracted = page.extract_tables()
+            tables_data = []
+            table_bboxes = []
+            found_tables = page.find_tables()
+            extracted_tables = page.extract_tables()
 
-        if not found_tables or not extracted:
-            return blocks, table_bboxes
+            if found_tables and extracted_tables:
+                for plumber_table, data in zip(found_tables, extracted_tables):
+                    if not data:
+                        continue
+                    bbox = plumber_table.bbox
+                    table_bboxes.append(bbox)
+                    tables_data.append({"bbox": bbox, "data": data})
 
-        for plumber_table, data in zip(found_tables, extracted):
-            if not data:
+            text_bands = self._extract_text_bands(page, table_bboxes, width, height)
+
+            chart_crops = []
+            raw_images = list(page.images)
+
+            for img in raw_images:
+                bbox = (img["x0"], img["top"], img["x1"], img["bottom"])
+
+                if any(self._bbox_overlaps(bbox, tb) for tb in table_bboxes):
+                    continue
+
+                x0 = max(0, img["x0"])
+                top = max(0, img["top"])
+                x1 = min(width, img["x1"])
+                bottom = min(height, img["bottom"])
+
+                img_width = x1 - x0
+                img_height = bottom - top
+                if img_width < 50 or img_height < 50:
+                    continue
+
+                clipped_bbox = (x0, top, x1, bottom)
+
+                if self.chart_description and self.image_processor:
+                    try:
+                        cropped_page = page.crop(clipped_bbox)
+                        pil_image = cropped_page.to_image(resolution=150).original
+                        chart_crops.append(
+                            {
+                                "bbox": clipped_bbox,
+                                "pil_image": pil_image,
+                                "width": img_width,
+                                "height": img_height,
+                                "y_top": img["top"],
+                                "y_bottom": img["bottom"],
+                            }
+                        )
+                    except Exception:
+                        chart_crops.append(
+                            {
+                                "bbox": clipped_bbox,
+                                "pil_image": None,
+                                "width": img_width,
+                                "height": img_height,
+                                "y_top": img["top"],
+                                "y_bottom": img["bottom"],
+                            }
+                        )
+                else:
+                    chart_crops.append(
+                        {
+                            "bbox": clipped_bbox,
+                            "pil_image": None,
+                            "width": img_width,
+                            "height": img_height,
+                            "y_top": img["top"],
+                            "y_bottom": img["bottom"],
+                        }
+                    )
+
+        return _ExtractedPageData(
+            width=width,
+            height=height,
+            tables=tables_data,
+            text_bands=text_bands,
+            images=raw_images,
+            chart_crops=chart_crops,
+        )
+
+    def _extract_text_bands(
+        self,
+        page,
+        table_bboxes: List[Tuple],
+        width: float,
+        height: float,
+    ) -> List[dict]:
+        """
+        Extract text from page, sliced around table bounding boxes.
+        Must be called while the page/file is still open.
+
+        Args:
+            page: Page object from pdfplumber.
+            table_bboxes: List of table bounding boxes.
+            width: Page width.
+            height: Page height.
+
+        Returns:
+            List of text bands.
+        """
+        text_bands = []
+
+        if not table_bboxes:
+            raw_text = page.extract_text(layout=True) or ""
+            if raw_text.strip():
+                text_bands.append(
+                    {
+                        "bbox": (0, 0, width, height),
+                        "text": raw_text.strip(),
+                        "y_top": 0,
+                        "y_bottom": height,
+                    }
+                )
+            return text_bands
+
+        sorted_bboxes = sorted(table_bboxes, key=lambda b: b[1])
+        bands = []
+        prev_bottom = 0
+
+        for bbox in sorted_bboxes:
+            x0, y_top, x1, y_bottom = bbox
+            if y_top > prev_bottom + 5:
+                bands.append((0, prev_bottom, width, y_top))
+            prev_bottom = y_bottom
+
+        if prev_bottom < height - 5:
+            bands.append((0, prev_bottom, width, height))
+
+        for band_bbox in bands:
+            try:
+                cropped = page.crop(band_bbox)
+                text = cropped.extract_text(layout=True) or ""
+                if text.strip():
+                    text_bands.append(
+                        {
+                            "bbox": band_bbox,
+                            "text": text.strip(),
+                            "y_top": band_bbox[1],
+                            "y_bottom": band_bbox[3],
+                        }
+                    )
+            except Exception:
                 continue
 
-            bbox = plumber_table.bbox  # (x0, top, x1, bottom)
-            table_bboxes.append(bbox)
+        return text_bands
 
-            md = self._format_table(data)
+    async def _build_blocks_from_extracted(self, extracted: _ExtractedPageData) -> List[PageBlock]:
+        """
+        Build PageBlock list from extracted data. File is already closed at this point.
+        VLM chart calls happen here (async), using PIL images captured earlier.
+        """
+        blocks: List[PageBlock] = []
+
+        # --- Table blocks ---
+        for table_info in extracted.tables:
+            md = self._format_table(table_info["data"])
+            bbox = table_info["bbox"]
             blocks.append(
                 PageBlock(
                     kind="table",
                     content=md,
                     y_top=bbox[1],
                     y_bottom=bbox[3],
-                    metadata={"rows": len(data), "cols": len(data[0]) if data else 0},
+                    metadata={
+                        "rows": len(table_info["data"]),
+                        "cols": len(table_info["data"][0]) if table_info["data"] else 0,
+                    },
                 )
             )
 
-        return blocks, table_bboxes
+        # --- Text blocks (with pseudo-table detection) ---
+        for band in extracted.text_bands:
+            text_block = PageBlock(
+                kind="text",
+                content=band["text"],
+                y_top=band["y_top"],
+                y_bottom=band["y_bottom"],
+                metadata={},
+            )
+            pseudo = self._detect_pseudo_table(text_block)
+            blocks.append(pseudo if pseudo else text_block)
+
+        # --- Chart blocks (async VLM calls, file already closed) ---
+        for crop_info in extracted.chart_crops:
+            if (
+                self.chart_description
+                and self.image_processor
+                and crop_info["pil_image"] is not None
+            ):
+                content = await self._describe_chart_with_vlm(crop_info["pil_image"])
+            else:
+                content = "<chart>Chart or image detected</chart>"
+
+            blocks.append(
+                PageBlock(
+                    kind="chart",
+                    content=content,
+                    y_top=crop_info["y_top"],
+                    y_bottom=crop_info["y_bottom"],
+                    metadata={
+                        "bbox": crop_info["bbox"],
+                        "width": crop_info["width"],
+                        "height": crop_info["height"],
+                    },
+                )
+            )
+
+        blocks.sort(key=lambda b: b.y_top)
+        return blocks
+
+    async def _describe_chart_with_vlm(self, pil_image) -> str:
+        """
+        Send a PIL image to VLM for description. File is already closed.
+
+        Args:
+            pil_image: PIL image to describe.
+
+        Returns:
+            Description of the chart or image.
+        """
+        try:
+            import cv2
+            import numpy as np
+
+            img_np = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            img_np = self.image_processor.process_image(img_np)
+            img_b64, mime_type = self.image_processor.encode_to_base64(img_np)
+
+            response = await self.vlm_client.invoke(
+                image_b64=img_b64,
+                mime_type=mime_type,
+                system_prompt="Describe this chart or image in one sentence only.",
+                user_prompt=self.chart_prompt,
+            )
+
+            description = (
+                response.choices[0].message.content.strip()
+                if response and response.choices
+                else "Chart or image"
+            )
+            description = extract_transcription(description)
+            return f"<chart>{description}</chart>"
+
+        except Exception:
+            return "<chart>Chart or image detected</chart>"
 
     def _format_table(self, data: list[list]) -> str:
         """Convert raw pdfplumber table data to markdown pipe table."""
@@ -192,69 +421,6 @@ class NativePDFParser:
             lines.append("| " + " | ".join(normalized) + " |")
 
         return "\n".join(lines)
-
-    def _extract_text_blocks(self, page: Page, table_bboxes: list[tuple]) -> list[PageBlock]:
-        """
-        Extract text preserving spatial layout using layout=True.
-        Excludes table areas by cropping page into non-table regions.
-        """
-        if not table_bboxes:
-            # No tables — extract full page with layout preserved
-            raw_text = page.extract_text(layout=True) or ""
-            if not raw_text.strip():
-                return []
-            return [
-                PageBlock(
-                    kind="text",
-                    content=raw_text.strip(),
-                    y_top=0,
-                    y_bottom=page.height,
-                    metadata={},
-                )
-            ]
-
-        # Slice page into horizontal bands that don't overlap with tables
-        # Sort table bboxes by vertical position
-        sorted_bboxes = sorted(table_bboxes, key=lambda b: b[1])  # sort by y_top
-
-        bands = []
-        prev_bottom = 0
-
-        for bbox in sorted_bboxes:
-            x0, y_top, x1, y_bottom = bbox
-
-            # Band above this table
-            if y_top > prev_bottom + 5:  # 5px tolerance
-                bands.append((0, prev_bottom, page.width, y_top))
-
-            prev_bottom = y_bottom
-
-        # Band below last table
-        if prev_bottom < page.height - 5:
-            bands.append((0, prev_bottom, page.width, page.height))
-
-        # Extract text from each band
-        blocks = []
-        for band_bbox in bands:
-            try:
-                cropped = page.crop(band_bbox)
-                text = cropped.extract_text(layout=True) or ""
-                if not text.strip():
-                    continue
-
-                blocks.append(
-                    PageBlock(
-                        kind="text",
-                        content=text.strip(),
-                        y_top=band_bbox[1],
-                        y_bottom=band_bbox[3],
-                        metadata={},
-                    )
-                )
-            except Exception:
-                continue
-
-        return blocks
 
     def _detect_pseudo_table(self, block: PageBlock) -> Optional[PageBlock]:
         """
@@ -345,128 +511,6 @@ class NativePDFParser:
         if last:
             cols.append(last)
         return cols or [""]
-
-    def _extract_chart_placeholders(self, page: Page, table_bboxes: list[tuple]) -> list[PageBlock]:
-        """
-        Detect image/chart bboxes on the page and write placeholder tags.
-        Used in sync mode (no VLM available).
-        """
-        blocks = []
-        for img in page.images:
-            # 1. Initial bbox
-            bbox = (img["x0"], img["top"], img["x1"], img["bottom"])
-
-            # 2. Skip images inside table areas
-            if any(self._bbox_overlaps(bbox, tb) for tb in table_bboxes):
-                continue
-
-            # 3. Clip to page boundaries
-            x0 = max(0, img["x0"])
-            top = max(0, img["top"])
-            x1 = min(page.width, img["x1"])
-            bottom = min(page.height, img["bottom"])
-
-            # 4. Skip tiny or invalid images after clipping
-            width = x1 - x0
-            height = bottom - top
-            if width < 50 or height < 50:
-                continue
-
-            bbox = (x0, top, x1, bottom)
-
-            blocks.append(
-                PageBlock(
-                    kind="chart",
-                    content="<chart>Chart or image detected</chart>",
-                    y_top=img["top"],
-                    y_bottom=img["bottom"],
-                    metadata={"bbox": bbox, "width": width, "height": height},
-                )
-            )
-
-        return blocks
-
-    async def _extract_charts_with_vlm(
-        self, page: Page, table_bboxes: list[tuple]
-    ) -> list[PageBlock]:
-        """
-        Detect chart/image bboxes, crop them, and send to VLM for description.
-        Used in async/hybrid mode.
-        """
-
-        if not self.image_processor:
-            # Fallback if no image processor was provided
-            return self._extract_chart_placeholders(page, table_bboxes)
-
-        blocks = []
-
-        for img in page.images:
-            # 1. Initial bbox
-            bbox = (img["x0"], img["top"], img["x1"], img["bottom"])
-
-            # 2. Skip images inside table areas
-            if any(self._bbox_overlaps(bbox, tb) for tb in table_bboxes):
-                continue
-
-            # 3. Clip to page boundaries
-            x0 = max(0, img["x0"])
-            top = max(0, img["top"])
-            x1 = min(page.width, img["x1"])
-            bottom = min(page.height, img["bottom"])
-
-            # 4. Skip tiny or invalid images after clipping
-            width = x1 - x0
-            height = bottom - top
-            if width < 50 or height < 50:
-                continue
-
-            bbox = (x0, top, x1, bottom)
-
-            try:
-                # Crop page to chart bbox and render as image
-                cropped_page = page.crop(bbox)
-                pil_img = cropped_page.to_image(resolution=150).original
-
-                import cv2
-                import numpy as np
-
-                img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-
-                # Use the injected image processor
-                img_np = self.image_processor.process_image(img_np)
-                img_b64, mime_type = self.image_processor.encode_to_base64(img_np)
-
-                response = await self.vlm_client.invoke(
-                    image_b64=img_b64,
-                    mime_type=mime_type,
-                    system_prompt="Describe this chart or image in one sentence only.",
-                    user_prompt=self.chart_prompt,
-                )
-
-                description = (
-                    response.choices[0].message.content.strip()
-                    if response and response.choices
-                    else "Chart or image"
-                )
-
-                description = extract_transcription(description)
-
-                content = f"<chart>{description}</chart>"
-
-            except Exception:
-                content = "<chart>Chart or image detected</chart>"
-
-            blocks.append(
-                PageBlock(
-                    kind="chart",
-                    content=content,
-                    y_top=img["top"],
-                    y_bottom=img["bottom"],
-                    metadata={"bbox": bbox, "width": width, "height": height},
-                )
-            )
-
-        return blocks
 
     def _build_result(self, blocks: list[PageBlock], page_num: int) -> NativeParseResult:
         """

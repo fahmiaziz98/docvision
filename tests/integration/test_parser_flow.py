@@ -49,7 +49,7 @@ async def test_full_pdf_parsing_flow(integration_parser):
         mock_pdf.pages = [MagicMock(), MagicMock()]  # 2 pages
         mock_pdf_open.return_value.__enter__.return_value = mock_pdf
 
-        # Mock fitz for image rendering
+        # Mock fitz for image rendering (used as a context manager)
         mock_fitz_doc = MagicMock()
         mock_fitz_doc.__len__.return_value = 2
         mock_page = MagicMock()
@@ -60,7 +60,8 @@ async def test_full_pdf_parsing_flow(integration_parser):
         mock_pix.n = 3
         mock_page.get_pixmap.return_value = mock_pix
         mock_fitz_doc.load_page.return_value = mock_page
-        mock_fitz_open.return_value = mock_fitz_doc
+        mock_fitz_open.return_value.__enter__.return_value = mock_fitz_doc
+        mock_fitz_open.return_value.__exit__.return_value = False
 
         # Run parsing
         results = await integration_parser.parse_pdf(pdf_path, parsing_mode=ParsingMode.VLM)
