@@ -22,9 +22,7 @@ def integration_parser():
     mock_response.choices = [mock_choice]
     mock_client.invoke.return_value = mock_response
 
-    with (
-        patch("docvision.core.parser.VLMClient", return_value=mock_client),
-    ):
+    with (patch("docvision.core.parser.VLMClient", return_value=mock_client),):
         p = DocumentParser(
             vlm_base_url="http://localhost:8080",
             vlm_model="test",
