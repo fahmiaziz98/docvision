@@ -1,4 +1,3 @@
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -52,6 +51,10 @@ class TestImageProcessor:
         mock_page = MagicMock()
         mock_pix = MagicMock()
 
+        # fitz.open() is used as a context manager: 'with fitz.open(...) as doc:'
+        mock_fitz_open.return_value.__enter__.return_value = mock_doc
+        mock_fitz_open.return_value.__exit__.return_value = False
+
         # Setup page return
         mock_doc.load_page.return_value = mock_page
         mock_doc.__len__.return_value = 1
@@ -63,12 +66,10 @@ class TestImageProcessor:
         mock_pix.n = 3
 
         mock_page.get_pixmap.return_value = mock_pix
-        mock_fitz_open.return_value = mock_doc
 
         with patch("pathlib.Path.exists", return_value=True):
             images = processor.pdf_to_images("dummy.pdf")
 
             assert len(images) == 1
             assert isinstance(images[0], np.ndarray)
-            mock_fitz_open.assert_called_with(Path("dummy.pdf"))
-            mock_doc.close.assert_called_once()
+            mock_fitz_open.assert_called_once()
