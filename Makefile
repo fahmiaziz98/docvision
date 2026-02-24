@@ -3,6 +3,7 @@
 # Variables
 PYTHON := python3
 RUFF := ruff
+BLACK := black
 PYTEST := pytest
 UV := uv
 
@@ -21,6 +22,10 @@ format:
 check:
 	$(UV) run $(RUFF) check .
 	$(UV) run $(RUFF) format --check .
+
+black:
+	$(UV) run $(BLACK) src/ tests/
+	$(UV) run $(BLACK) --check src/ tests/
 
 # Testing
 test:

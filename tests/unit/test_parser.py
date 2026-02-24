@@ -11,17 +11,15 @@ from docvision.core.types import ParseResult, ParsingMode
 @pytest.fixture
 def mock_vlm_client():
     client = MagicMock()
-    # Mock async invoke method
     client.invoke = AsyncMock()
 
-    # Mock response object structure
     mock_response = MagicMock()
     mock_choice = MagicMock()
     mock_message = MagicMock()
-    mock_message.content = "Extracted text content"
+    mock_message.content = "<transcription>Extracted text content</transcription>"
+    mock_message.parsed = None
     mock_choice.message = mock_message
     mock_response.choices = [mock_choice]
-
     client.invoke.return_value = mock_response
     return client
 
@@ -29,11 +27,9 @@ def mock_vlm_client():
 @pytest.fixture
 def mock_image_processor():
     processor = MagicMock()
-    # Mock encoding
     processor.encode_to_base64.return_value = ("base64string", "image/jpeg")
-    # Mock processing
-    processor.process_image.return_value = np.zeros((100, 100, 3), dtype=np.uint8)
-    # Mock PDF conversion
+    processor.preprocess_for_ocr.return_value = np.zeros((100, 100, 3), dtype=np.uint8)
+    processor.preprocess_for_vlm.return_value = np.zeros((100, 100, 3), dtype=np.uint8)
     processor.pdf_to_images.return_value = [np.zeros((100, 100, 3), dtype=np.uint8)]
     return processor
 
@@ -45,9 +41,10 @@ def parser(mock_vlm_client, mock_image_processor):
         patch("docvision.core.parser.ImageProcessor", return_value=mock_image_processor),
     ):
         p = DocumentParser(
-            vlm_base_url="https://api.test.com", vlm_model="test-model", vlm_api_key="test-key"
+            vlm_base_url="https://api.test.com",
+            vlm_model="test-model",
+            vlm_api_key="test-key",
         )
-        # Inject mocks directly to ensure they are used
         p._client = mock_vlm_client
         p._image_processor = mock_image_processor
         return p
@@ -56,67 +53,155 @@ def parser(mock_vlm_client, mock_image_processor):
 @pytest.mark.unit
 class TestDocumentParser:
     @pytest.mark.asyncio
-    async def test_parse_image(self, parser, mock_vlm_client):
-        # Create a dummy image array
+    async def test_parse_image_vlm(self, parser, mock_vlm_client):
         img_array = np.zeros((100, 100, 3), dtype=np.uint8)
 
-        # Mock _load_image to avoid CV2 dependency on non-existent file
         with patch.object(parser, "_load_image", return_value=img_array):
-            result = await parser.parse_image("test_image.jpg")
+            result = await parser.parse_image("test_image.jpg", parsing_mode=ParsingMode.VLM)
 
-            assert isinstance(result, ParseResult)
-            assert result.content == "Extracted text content"
-            assert "file_name" in result.metadata
-            assert result.metadata["file_name"] == "test_image.jpg"
-
-            # Verify client was called
-            mock_vlm_client.invoke.assert_called_once()
+        assert isinstance(result, ParseResult)
+        assert result.content == "Extracted text content"
+        assert result.metadata["file_name"] == "test_image.jpg"
+        assert result.metadata["parsing_mode"] == ParsingMode.VLM.value
+        mock_vlm_client.invoke.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_parse_pdf_vlm_mode(self, parser, mock_vlm_client):
-        pdf_path = "test.pdf"
+    async def test_parse_image_agentic_raises(self, parser):
+        """parse_image should reject AGENTIC mode."""
+        img_array = np.zeros((100, 100, 3), dtype=np.uint8)
 
-        # Mock PDF info and page processing
-        with (
-            patch("pathlib.Path.exists", return_value=True),
-            patch("pdfplumber.open") as mock_pdf_open,
-            patch.object(parser, "_process_page_vlm") as mock_process_vlm,
-        ):
-            # Mock PDF page count
-            mock_pdf = MagicMock()
-            mock_pdf.pages = [MagicMock()]
-            mock_pdf_open.return_value.__enter__.return_value = mock_pdf
-
-            # Mock result
-            mock_result = ParseResult(
-                id="test-id", content="Page content", metadata={"page_number": 1}
-            )
-            mock_process_vlm.return_value = mock_result
-
-            results = await parser.parse_pdf(pdf_path, parsing_mode=ParsingMode.VLM)
-
-            assert len(results) == 1
-            assert results[0].content == "Page content"
-            assert results[0].metadata["page_number"] == 1
+        with patch.object(parser, "_load_image", return_value=img_array):
+            with pytest.raises(ValueError, match="AGENTIC"):
+                await parser.parse_image("test.jpg", parsing_mode=ParsingMode.AGENTIC)
 
     @pytest.mark.asyncio
-    async def test_parse_image_agentic_mode_fallback(self, parser):
-        # Current implementation of parse_image doesn't seem to have a parsing_mode arg
-        # But let's check if it should. Wait, looking at parser.py,
-        # parse_image ALWAYS calls _call_vlm which is single-shot unless it's in a DIFFERENT method.
-        # Oh, I see _process_page_agentic in parser.py but parse_image doesn't use it?
-        pass
+    async def test_parse_image_output_schema_non_vlm_raises(self, parser):
+        """output_schema with BASIC_OCR should raise."""
+
+        class TestSchema(BaseModel):
+            field: str
+
+        img_array = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        with patch.object(parser, "_load_image", return_value=img_array):
+            with pytest.raises(ValueError, match="output_schema"):
+                await parser.parse_image(
+                    "test.jpg",
+                    parsing_mode=ParsingMode.BASIC_OCR,
+                    output_schema=TestSchema,
+                )
 
     @pytest.mark.asyncio
-    async def test_structured_output(self, parser, mock_vlm_client):
+    async def test_parse_image_structured_output(self, parser, mock_vlm_client):
+        """output_schema should be forwarded to VLM client."""
+
         class TestModel(BaseModel):
             field: str
 
         img_array = np.zeros((100, 100, 3), dtype=np.uint8)
 
         with patch.object(parser, "_load_image", return_value=img_array):
-            await parser.parse_image("test.jpg", output_schema=TestModel)
+            await parser.parse_image(
+                "test.jpg", parsing_mode=ParsingMode.VLM, output_schema=TestModel
+            )
 
-            # Check if output_schema was passed to internal call
-            args, kwargs = mock_vlm_client.invoke.call_args
-            assert kwargs["output_schema"] == TestModel
+        _, kwargs = mock_vlm_client.invoke.call_args
+        assert kwargs["output_schema"] == TestModel
+
+    @pytest.mark.asyncio
+    async def test_parse_pdf_vlm_mode(self, parser, mock_vlm_client):
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch.object(parser, "_get_pdf_page_count", return_value=2),
+            patch.object(parser, "_process_page_vlm") as mock_process,
+        ):
+            mock_process.side_effect = lambda path, page_n, meta, output_schema=None: (
+                ParseResult(
+                    id=f"id-{page_n}",
+                    content=f"Page {page_n} content",
+                    metadata={"page_number": page_n},
+                )
+            )
+
+            results = await parser.parse_pdf("test.pdf", parsing_mode=ParsingMode.VLM)
+
+        assert len(results) == 2
+        assert results[0].metadata["page_number"] == 1
+        assert results[1].metadata["page_number"] == 2
+
+    @pytest.mark.asyncio
+    async def test_parse_pdf_output_schema_non_vlm_raises(self, parser):
+        """output_schema with BASIC_OCR in parse_pdf should raise."""
+
+        class TestSchema(BaseModel):
+            field: str
+
+        with patch("pathlib.Path.exists", return_value=True):
+            with pytest.raises(ValueError, match="output_schema"):
+                await parser.parse_pdf(
+                    "test.pdf",
+                    parsing_mode=ParsingMode.BASIC_OCR,
+                    output_schema=TestSchema,
+                )
+
+    @pytest.mark.asyncio
+    async def test_parse_pdf_output_schema_forwarded_to_pages(self, parser):
+        """output_schema should be forwarded to each _process_page_vlm call."""
+
+        class TestSchema(BaseModel):
+            field: str
+
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch.object(parser, "_get_pdf_page_count", return_value=1),
+            patch.object(parser, "_process_page_vlm") as mock_process,
+        ):
+            mock_process.return_value = ParseResult(
+                id="id-1", content="content", metadata={"page_number": 1}
+            )
+
+            await parser.parse_pdf(
+                "test.pdf",
+                parsing_mode=ParsingMode.VLM,
+                output_schema=TestSchema,
+            )
+
+        # _process_page_vlm is called as: (path, page_n, meta, output_schema)
+        _, positional_args = mock_process.call_args
+        # call signature: _process_page_vlm(path, page_n, meta, output_schema)
+        args, kwargs = mock_process.call_args
+        # output_schema is the 4th positional arg
+        assert args[3] == TestSchema
+
+    @pytest.mark.asyncio
+    async def test_parse_pdf_start_page_exceeds_total_raises(self, parser):
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch.object(parser, "_get_pdf_page_count", return_value=3),
+        ):
+            with pytest.raises(ValueError, match="start_page"):
+                await parser.parse_pdf("test.pdf", start_page=10)
+
+    @pytest.mark.asyncio
+    async def test_parse_pdf_no_vlm_client_raises(self):
+        """VLM/AGENTIC modes require credentials."""
+        p = DocumentParser()  # no VLM credentials
+
+        with patch("pathlib.Path.exists", return_value=True):
+            with pytest.raises(ValueError, match="credentials"):
+                await p.parse_pdf("test.pdf", parsing_mode=ParsingMode.VLM)
+
+    @pytest.mark.asyncio
+    async def test_parse_pdf_file_not_found(self, parser):
+        with pytest.raises(FileNotFoundError):
+            await parser.parse_pdf("nonexistent.pdf")
+
+    def test_max_reflect_cycles_warning(self):
+        """max_reflect_cycles > 2 should emit a UserWarning."""
+        with pytest.warns(UserWarning, match="max_reflect_cycles"):
+            DocumentParser(
+                vlm_base_url="http://test",
+                vlm_model="test",
+                vlm_api_key="test",
+                max_reflect_cycles=5,
+            )

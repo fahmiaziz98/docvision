@@ -1,5 +1,5 @@
 import operator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, List, Optional, TypedDict
 
@@ -7,7 +7,7 @@ from typing import Annotated, Any, List, Optional, TypedDict
 class ParsingMode(str, Enum):
     """Available document parsing modes."""
 
-    PDF = "pdf_parsing"  # Native parsing
+    BASIC_OCR = "ocr_engine"  # ocr parsing
     VLM = "parse_with_vlm"  # Standard single-shot VLM parsing
     AGENTIC = "parse_with_agent"  # Iterative/agentic parsing for long or complex documents
 
@@ -32,35 +32,6 @@ class RotationResult:
 
 
 @dataclass
-class PageBlock:
-    """
-    A single content block extracted from a page.
-    Tracks its vertical position for reading-order reconstruction.
-    """
-
-    kind: str  # "text" | "table" | "pseudo_table" | "chart"
-    content: str  # Markdown-formatted string
-    y_top: float  # Top y-coordinate (for ordering)
-    y_bottom: float  # Bottom y-coordinate
-    metadata: dict = field(default_factory=dict)
-
-
-@dataclass
-class NativeParseResult:
-    """
-    Result from NativePDFParser for a single page.
-    """
-
-    markdown: str  # Full page as Markdown string
-    metadata: dict[str, Any]  # Structured metadata
-    page_number: int
-    has_tables: bool
-    has_pseudo_tables: bool
-    has_charts: bool
-    block_count: int
-
-
-@dataclass
 class DocumentMetadata:
     """
     Core metadata for a document.
@@ -81,15 +52,20 @@ class ParseResult:
 
 class AgenticParseState(TypedDict):
     """
-    State dictionary used to maintain context during an agentic/iterative parsing loop.
+    State dictionary for the agentic reflect parsing workflow.
 
     Attributes:
         image_b64: Base64 encoded image of the page being parsed.
         mime_type: MIME type of the image.
-        accumulated_text: The total text extracted so far across iterations.
-        iteration_count: Current iteration number.
-        current_prompt: The prompt being used for the current iteration.
-        generation_history: List of strings tracking the incremental growth of the output.
+        accumulated_text: Total text extracted so far.
+        iteration_count: Current generator iteration number.
+        current_prompt: Prompt for the current generator call.
+        generation_history: List tracking incremental generation output.
+
+        --- Reflect pattern fields ---
+        critic_score: Quality score from critic agent (0-10).
+        critic_issues: Specific issues identified by critic.
+        reflect_iteration: Number of reflect cycles completed.
     """
 
     image_b64: str
@@ -98,3 +74,8 @@ class AgenticParseState(TypedDict):
     iteration_count: int
     current_prompt: str
     generation_history: Annotated[List[str], operator.add]
+
+    # Reflect pattern
+    critic_score: int
+    critic_issues: List[str]
+    reflect_iteration: int

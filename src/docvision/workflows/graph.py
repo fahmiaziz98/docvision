@@ -3,13 +3,13 @@ from typing import Dict, Literal, Optional
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, RetryPolicy
 
-from ..core import CONTINUE_PROMPT, FIX_PROMPT, VLMClient
+from ..core import DEFAULT_SYSTEM_PROMPT, VLMClient
 from ..core.types import AgenticParseState
 from ..utils import (
-    check_max_tokens_hit,
-    detect_retention_loop,
+    # check_max_tokens_hit,
+    # detect_retention_loop,
     extract_transcription,
-    has_complete_transcription,
+    # has_complete_transcription,
 )
 
 MAX_ITERATIONS = 3
@@ -139,7 +139,7 @@ class AgenticWorkflow:
         # ========== ROUTING LOGIC ==========
 
         # Check 1: Repetition loop detection
-        text_before_loop = detect_retention_loop(accumulated)
+        text_before_loop = extract_transcription(accumulated)
         if text_before_loop is not None:
             restart_from = (
                 text_before_loop[-500:] if len(text_before_loop) > 500 else text_before_loop
@@ -148,14 +148,14 @@ class AgenticWorkflow:
                 update={
                     "accumulated_text": text_before_loop,
                     "iteration_count": iteration,
-                    "current_prompt": FIX_PROMPT.format(restart_from=restart_from),
+                    "current_prompt": DEFAULT_SYSTEM_PROMPT.format(restart_from=restart_from),
                     "generation_history": state.get("generation_history", []) + [response_text],
                 },
                 goto="generate",
             )
 
         # Check 2: Successful completion (closing tag found)
-        if has_complete_transcription(accumulated):
+        if extract_transcription(accumulated):
             return Command(
                 update={
                     "accumulated_text": accumulated,
@@ -166,13 +166,13 @@ class AgenticWorkflow:
             )
 
         # Check 3: Max tokens hit (truncation)
-        if check_max_tokens_hit(response):
+        if extract_transcription(response):
             context = accumulated[-300:] if len(accumulated) > 300 else accumulated
             return Command(
                 update={
                     "accumulated_text": accumulated,
                     "iteration_count": iteration,
-                    "current_prompt": CONTINUE_PROMPT.format(context=context),
+                    "current_prompt": DEFAULT_SYSTEM_PROMPT.format(context=context),
                     "generation_history": state.get("generation_history", []) + [response_text],
                 },
                 goto="generate",
@@ -185,7 +185,7 @@ class AgenticWorkflow:
             update={
                 "accumulated_text": accumulated,
                 "iteration_count": iteration,
-                "current_prompt": CONTINUE_PROMPT.format(context=context),
+                "current_prompt": DEFAULT_SYSTEM_PROMPT.format(context=context),
                 "generation_history": state.get("generation_history", []) + [response_text],
             },
             goto="generate",

@@ -45,25 +45,9 @@ IGNORE
 - Watermarks and diagonal background text.
 """
 
-DEFAULT_USER_PROMPT = "Transcribe this document into Markdown. Follow all rules. Output only the <transcription> block."
-
-CONTINUE_PROMPT = """\
-Continue the transcription from exactly where you stopped. Do not repeat what is already written.
-
-Last content written:
-...{context}
-
-Continue from this point. Close with </transcription> when the full page is done.\
-"""
-
-FIX_PROMPT = """\
-You got stuck in a repetition loop. Resume transcription from before the loop started.
-
-Last valid content:
-...{restart_from}
-
-Continue from this exact point. Do not repeat anything already written.
-Close with </transcription> when the full page is done.\
-"""
+DEFAULT_USER_PROMPT = (
+    "Transcribe this document into Markdown. "
+    "Follow all rules. Output only the <transcription> block."
+)
 
 TRANSCRIPTION = "IMPORTANT: Wrap ONLY the content in <transcription></transcription> tags."
