@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, List, Optional, TypedDict
 
+from pydantic import BaseModel, Field
+
 
 class ParsingMode(str, Enum):
     """Available document parsing modes."""
@@ -79,3 +81,14 @@ class AgenticParseState(TypedDict):
     critic_score: int
     critic_issues: List[str]
     reflect_iteration: int
+
+
+class CriticOutput(BaseModel):
+    score: int = Field(
+        ge=0, le=10, description="Completeness score (0-10). 8-10: OK, 0-7: Broken/Incomplete."
+    )
+    issues: List[str] = Field(
+        default_factory=list,
+        description="Specific structural issues (e.g., 'table cut off', 'missing pipes', 'duplicates').",
+    )
+    needs_revision: bool = Field(description="True if score < 8 and fixes are required.")

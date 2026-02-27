@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -9,11 +10,13 @@ from docvision.processing.image import ImageProcessor
 
 @pytest.fixture
 def processor():
+    """No-op processor: rotate, crop, deskew all disabled."""
     return ImageProcessor(
-        render_zoom=1,
+        dpi=72,
         enable_rotate=False,
+        enable_crop=False,
         enable_deskew=False,
-        post_crop_max_size=500,
+        post_crop_max_size=2000,  # large enough not to resize a 100x100 image
     )
 
 
@@ -23,7 +26,7 @@ def sample_image_np():
 
 
 def _make_fitz_ctx_mock(page_count: int = 1):
-    """Return a context-manager-compatible fitz.open() mock."""
+    """Context-manager-compatible fitz.open() mock."""
     mock_doc = MagicMock()
     mock_doc.__len__.return_value = page_count
 
@@ -46,25 +49,26 @@ def _make_fitz_ctx_mock(page_count: int = 1):
 @pytest.mark.unit
 class TestImageProcessor:
     def test_init(self):
-        proc = ImageProcessor(render_zoom=3, enable_rotate=True)
-        assert proc.render_zoom == 3
+        proc = ImageProcessor(dpi=150, enable_rotate=True)
+        assert proc.dpi == 150
         assert proc.enable_rotate is True
         assert proc.rotation_pipeline is not None
 
-    def test_encode_to_base64_numpy(self, processor, sample_image_np):
+    def test_encode_to_base64_default_png(self, processor, sample_image_np):
+        """Default format is now PNG."""
         b64, mime = processor.encode_to_base64(sample_image_np)
         assert isinstance(b64, str)
-        assert mime == "image/jpeg"
+        assert mime == "image/png"
         assert len(b64) > 0
+
+    def test_encode_to_base64_jpeg(self, processor, sample_image_np):
+        b64, mime = processor.encode_to_base64(sample_image_np, img_format="JPEG")
+        assert mime == "image/jpeg"
 
     def test_encode_to_base64_pil(self, processor):
         img_pil = Image.new("RGB", (100, 100), color="red")
-        b64, mime = processor.encode_to_base64(img_pil)
+        b64, mime = processor.encode_to_base64(img_pil)  # default PNG
         assert isinstance(b64, str)
-        assert mime == "image/jpeg"
-
-    def test_encode_to_base64_png(self, processor, sample_image_np):
-        b64, mime = processor.encode_to_base64(sample_image_np, img_format="PNG")
         assert mime == "image/png"
 
     def test_encode_to_base64_invalid_format(self, processor, sample_image_np):
@@ -72,20 +76,31 @@ class TestImageProcessor:
             processor.encode_to_base64(sample_image_np, img_format="BMP")
 
     def test_preprocess_for_vlm_no_ops(self, processor, sample_image_np):
-        # enable_rotate=False, no rotation pipeline active
+        """With all ops disabled and post_crop_max_size > image size, shape is unchanged."""
         result = processor.preprocess_for_vlm(sample_image_np)
         assert isinstance(result, np.ndarray)
-        # padding adds 32px total (16 each side) to each dimension
-        assert result.shape[0] == 100 + 32
-        assert result.shape[1] == 100 + 32
+        # Shape should be unchanged - no crop, no resize
+        assert result.shape == sample_image_np.shape
 
-    def test_preprocess_for_ocr_no_rotate(self, processor, sample_image_np):
+    def test_preprocess_for_ocr_returns_array(self, processor, sample_image_np):
         result = processor.preprocess_for_ocr(sample_image_np)
         assert isinstance(result, np.ndarray)
 
+    def test_preprocess_for_vlm_resize(self):
+        """When image exceeds post_crop_max_size, it should be downscaled."""
+        proc = ImageProcessor(
+            dpi=72,
+            enable_rotate=False,
+            enable_crop=False,
+            post_crop_max_size=50,
+        )
+        large_img = np.zeros((200, 200, 3), dtype=np.uint8)
+        result = proc.preprocess_for_vlm(large_img)
+        assert max(result.shape[:2]) <= 50
+
     @patch("docvision.processing.image.fitz.open")
     def test_pdf_to_images_mock(self, mock_fitz_open, processor):
-        # fitz.open() is used as a context manager: 'with fitz.open(...) as doc:'
+        """fitz.open() is used as a context manager."""
         mock_fitz_open.return_value = _make_fitz_ctx_mock(page_count=1)
 
         with patch("pathlib.Path.exists", return_value=True):
@@ -102,7 +117,6 @@ class TestImageProcessor:
         with patch("pathlib.Path.exists", return_value=True):
             images = processor.pdf_to_images("dummy.pdf", start_page=2, end_page=3)
 
-        # Should render pages 2 and 3 only
         assert len(images) == 2
 
     def test_pdf_to_images_file_not_found(self, processor):

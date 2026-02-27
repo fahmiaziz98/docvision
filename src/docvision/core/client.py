@@ -58,6 +58,7 @@ class VLMClient:
         self,
         image_b64: str,
         mime_type: str,
+        temperature_override: Optional[float] = None,
         system_prompt: Optional[str] = None,
         user_prompt: Optional[str] = None,
         output_schema: Optional[Type[BaseModel]] = None,
@@ -68,6 +69,7 @@ class VLMClient:
         Args:
             image_b64: Base64 encoded image string.
             mime_type: The MIME type of the image.
+            temperature_override: Optional temperature override.
             system_prompt: Optional system prompt override.
             user_prompt: Optional user prompt override.
             output_schema: Optional Pydantic model for structured output parsing.
@@ -89,7 +91,7 @@ class VLMClient:
                         model=self.model_name,
                         messages=messages,
                         max_tokens=self.max_tokens,
-                        temperature=self.temperature,
+                        temperature=temperature_override or self.temperature,
                         response_format=output_schema,
                     )
                 else:
@@ -97,7 +99,7 @@ class VLMClient:
                         model=self.model_name,
                         messages=messages,
                         max_tokens=self.max_tokens,
-                        temperature=self.temperature,
+                        temperature=temperature_override or self.temperature,
                     )
 
             except Exception as e:
@@ -152,11 +154,11 @@ class VLMClient:
         from .constants import DEFAULT_USER_PROMPT
 
         user_content = [
-            {"type": "text", "text": user_prompt or DEFAULT_USER_PROMPT},
             {
                 "type": "image_url",
                 "image_url": {"url": f"data:{mime_type};base64,{image_b64}"},
             },
+            {"type": "text", "text": user_prompt or DEFAULT_USER_PROMPT},
         ]
 
         messages.append({"role": "user", "content": user_content})

@@ -24,9 +24,9 @@ def integration_parser():
 
     with patch("docvision.core.parser.VLMClient", return_value=mock_client):
         p = DocumentParser(
-            vlm_base_url="http://localhost:8080",
-            vlm_model="test",
-            vlm_api_key="test",
+            base_url="http://localhost:8080",
+            model_name="test",
+            api_key="test",
             enable_rotate=False,
         )
         p._client = mock_client
