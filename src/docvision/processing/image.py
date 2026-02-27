@@ -8,6 +8,7 @@ import fitz
 import numpy as np
 from PIL import Image
 
+from .crop import ContentCropper
 from .rotate import AutoRotate
 
 
@@ -24,7 +25,9 @@ class ImageProcessor:
 
     def __init__(
         self,
-        render_zoom: float = 2.0,
+        dpi: float = 300,
+        enable_crop: bool = True,
+        padding_size: int = 10,
         enable_rotate: bool = True,
         rotate_aggressive_mode: bool = False,
         enable_deskew: bool = True,
@@ -35,20 +38,26 @@ class ImageProcessor:
         Initialize the ImageProcessor.
 
         Args:
-            render_zoom: Zoom factor for PDF rendering. 2.0 ≈ 144 DPI.
+            dpi: DPI for PDF rendering. 2.0 ≈ 144 DPI.
+            enable_crop: Enable content cropping to remove whitespace.
+            padding_size: Padding size for content cropping.
             enable_rotate: Auto-correct large rotations (90°/180°) via Hough transform.
             rotate_aggressive_mode: Aggressive mode rotate
             enable_deskew: Correct small skew angles (1–5°) before OCR.
             post_crop_max_size: Max image dimension for VLM preprocessing.
+                                Recommended: 1536 for 8B models, 2048 for 72B+ models,
+                                1024 for 3B and below.
             debug_dir: If set, saves preprocessed images here for inspection.
         """
-        self.render_zoom = render_zoom
+        self.dpi = dpi
+        self.enable_crop = enable_crop
         self.enable_rotate = enable_rotate
         self.enable_deskew = enable_deskew
         self.post_crop_max_size = post_crop_max_size
         self.debug_dir = Path(debug_dir) if debug_dir else None
 
         self.rotation_pipeline = AutoRotate(aggressive_mode=rotate_aggressive_mode)
+        self.content_cropper = ContentCropper(padding=padding_size)
 
     def pdf_to_images(
         self,
@@ -80,8 +89,9 @@ class ImageProcessor:
                 images = []
                 for page_num in range(_start, _end + 1):
                     page = doc.load_page(page_num - 1)
+                    zoom = self.dpi / 72
                     pix = page.get_pixmap(
-                        matrix=fitz.Matrix(self.render_zoom, self.render_zoom),
+                        matrix=fitz.Matrix(zoom, zoom),
                         alpha=False,
                     )
                     img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
@@ -143,10 +153,11 @@ class ImageProcessor:
         Preprocess image for Vision Language Model inference.
 
         Pipeline:
-        1. Auto-rotate  — correct large rotations (90°/180°) [if enable_rotate]
-        2. White balance — correct color cast from lighting
+        1. Auto-rotate    — correct large rotations (90°/180°) [if enable_rotate]
+        2. White balance  — correct color cast from lighting
         3. Adaptive resize — cap longest dimension at post_crop_max_size
-        4. Add padding — prevent content from touching image edges
+        4. Unsharp mask   — recover text edge sharpness lost during downscale
+        5. Add padding    — prevent content from touching image edges
 
         Intentionally minimal — VLMs are robust to noise and compression.
         Over-processing destroys color/texture context that VLMs rely on.
@@ -163,9 +174,13 @@ class ImageProcessor:
         if self.enable_rotate:
             img, _ = self.rotation_pipeline.auto_rotate(img)
 
-        img = self._normalize_white_balance(img)
+        if self.enable_crop:
+            img = self.content_cropper.crop(img)
+
+        # img = self._normalize_white_balance(img)
         img = self._adaptive_resize(img, max_size=self.post_crop_max_size)
-        img = self._add_padding(img)
+        # img = self._unsharp_mask(img)
+        # img = self._add_padding(img)
 
         if self.debug_dir:
             self._save_debug([img], prefix=f"vlm_p{page_num or 0}")
@@ -175,7 +190,7 @@ class ImageProcessor:
     @staticmethod
     def encode_to_base64(
         image: Union[np.ndarray, Image.Image],
-        img_format: str = "JPEG",
+        img_format: str = "PNG",
         quality: int = 95,
     ) -> Tuple[str, str]:
         """
@@ -351,6 +366,21 @@ class ImageProcessor:
         return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 
     @staticmethod
+    def _unsharp_mask(image: np.ndarray, strength: float = 0.5) -> np.ndarray:
+        """
+        Apply unsharp mask to recover edge sharpness lost during resize.
+
+        Uses Gaussian blur as the blurred reference, then blends:
+            sharpened = original * (1 + strength) - blurred * strength
+
+        strength=0.5 is conservative — recovers text edges without
+        introducing halos or over-sharpening document backgrounds.
+        """
+        blurred = cv2.GaussianBlur(image, (0, 0), sigmaX=2.0)
+        sharpened = cv2.addWeighted(image, 1.0 + strength, blurred, -strength, 0)
+        return np.clip(sharpened, 0, 255).astype(np.uint8)
+
+    @staticmethod
     def _add_padding(
         image: np.ndarray,
         padding: int = 16,
@@ -376,7 +406,7 @@ class ImageProcessor:
         self,
         images: List[np.ndarray],
         prefix: str = "debug",
-        quality: int = 90,
+        quality: int = 95,
     ) -> None:
         """Save preprocessed images to debug_dir for visual inspection."""
         if not self.debug_dir:

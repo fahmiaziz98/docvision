@@ -19,3 +19,11 @@ def extract_transcription(text: str) -> Optional[str]:
         return match.group(1).strip()
 
     return text.strip()
+
+
+def extract_response_text(response) -> str:
+    """Safely extract text content from a VLM API response object."""
+    try:
+        return response.choices[0].message.content.strip()
+    except (AttributeError, IndexError):
+        return ""

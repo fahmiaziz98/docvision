@@ -2,7 +2,6 @@ import asyncio
 import copy
 import json
 import time
-import warnings
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type, Union
@@ -13,8 +12,7 @@ from pydantic import BaseModel
 
 from ..processing import ImageProcessor
 from ..utils.helper import extract_transcription
-
-# from ..workflows.graph import AgenticWorkflow
+from ..workflows.graph import AgenticWorkflow
 from .client import VLMClient
 from .types import DocumentMetadata, ParseResult, ParsingMode
 
@@ -32,9 +30,9 @@ class DocumentParser:
     def __init__(
         self,
         # --- VLM config (required for VLM and AGENTIC modes) ---
-        vlm_base_url: Optional[str] = None,
-        vlm_model: Optional[str] = None,
-        vlm_api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         system_prompt: Optional[str] = None,
@@ -42,11 +40,13 @@ class DocumentParser:
         max_reflect_cycles: int = 2,
         ocr_language: str = "english",
         ocr_model_dir: Optional[Union[str, Path]] = None,
+        dpi: float = 300,
+        enable_crop: bool = True,
+        padding_size: int = 10,
         enable_rotate: bool = True,
         rotate_aggressive_mode: bool = False,
         enable_deskew: bool = True,
-        render_zoom: float = 2.0,
-        post_crop_max_size: int = 1024,
+        post_crop_max_size: int = 1536,
         max_concurrency: int = 5,
         debug_dir: Optional[Union[str, Path]] = None,
     ):
@@ -54,9 +54,9 @@ class DocumentParser:
         Initialize the DocumentParser.
 
         Args:
-            vlm_base_url: Base URL for the VLM API.
-            vlm_model: Model name to use for vision tasks.
-            vlm_api_key: API key for the VLM service.
+            base_url: Base URL for the VLM API.
+            model_name: Model name to use for vision tasks.
+            api_key: API key for the VLM service.
             temperature: Sampling temperature for VLM calls.
             max_tokens: Maximum tokens to generate per call.
             system_prompt: System prompt override for VLM calls.
@@ -69,33 +69,29 @@ class DocumentParser:
             ocr_model_dir: Custom path to OCR model directory.
                            If None, models are auto-downloaded to
                            ~/.cache/docvision/models/ on first use.
+            dpi: DPI for PDF rendering via fitz.
+            enable_crop: Whether to automatically crop content from images.
+            padding_size: Padding size for content cropping.
             enable_rotate: Whether to automatically correct image orientation.
             rotate_aggressive_mode: Aggressive mode rotate
             enable_deskew: Whether to correct small skew angles for OCR.
-            render_zoom: DPI multiplier for PDF rendering via fitz.
             post_crop_max_size: Max image dimension after preprocessing (VLM mode).
+                                 Recommended: 1536 for 8B models, 2048 for 72B+ models,
+                                 1024 for 3B and below.
             max_concurrency: Max concurrent pages being processed.
             debug_dir: Directory to save debug images (optional).
         """
-        # Validate max_reflect_cycles
-        if max_reflect_cycles > 2:
-            warnings.warn(
-                f"max_reflect_cycles={max_reflect_cycles} exceeds the recommended maximum of 2. "
-                "This will increase token usage significantly.",
-                UserWarning,
-                stacklevel=2,
-            )
 
         self.max_concurrency = max_concurrency
         self.ocr_language = ocr_language
         self.ocr_model_dir = ocr_model_dir
         self.enable_deskew = enable_deskew
 
-        if vlm_base_url and vlm_model and vlm_api_key:
+        if base_url and model_name and api_key:
             self._client = VLMClient(
-                base_url=vlm_base_url,
-                api_key=vlm_api_key,
-                model_name=vlm_model,
+                base_url=base_url,
+                api_key=api_key,
+                model_name=model_name,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
@@ -104,20 +100,23 @@ class DocumentParser:
 
         self.system_prompt = system_prompt
 
-        # self._agentic_workflow = (
-        #     AgenticWorkflow(
-        #         vlm_client=self._client,
-        #         system_prompt=system_prompt,
-        #         max_iterations=max_iterations,
-        #         # max_reflect_cycles=max_reflect_cycles,
-        #     )
-        #     if self._client
-        #     else None
-        # )
+        self._agentic_workflow = (
+            AgenticWorkflow(
+                vlm_client=self._client,
+                system_prompt=system_prompt,
+                max_iterations=max_iterations,
+                max_reflect_cycles=max_reflect_cycles,
+            )
+            if self._client
+            else None
+        )
 
         self._image_processor = ImageProcessor(
-            render_zoom=render_zoom,
+            dpi=dpi,
+            enable_crop=enable_crop,
+            padding_size=padding_size,
             enable_rotate=enable_rotate,
+            enable_deskew=enable_deskew,
             rotate_aggressive_mode=rotate_aggressive_mode,
             post_crop_max_size=post_crop_max_size,
             debug_dir=debug_dir,
@@ -436,7 +435,8 @@ class DocumentParser:
         metadata["processing_time"] = time.time() - start_time
         metadata["parsing_mode"] = ParsingMode.AGENTIC.value
         metadata["reflect_iterations"] = state.get("reflect_iteration", 0)
-        metadata["final_critic_score"] = state.get("critic_score", None)
+        metadata["final_critic_score"] = state.get("critic_score", 0)
+        metadata["final_critic_issues"] = state.get("critic_issues") or []
 
         if not content.strip():
             return None

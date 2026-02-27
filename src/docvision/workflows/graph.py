@@ -1,231 +1,217 @@
-from typing import Dict, Literal, Optional
+import warnings
+from typing import Any, Dict, Literal, Optional
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, RetryPolicy
 
-from ..core import DEFAULT_SYSTEM_PROMPT, VLMClient
-from ..core.types import AgenticParseState
-from ..utils import (
-    # check_max_tokens_hit,
-    # detect_retention_loop,
-    extract_transcription,
-    # has_complete_transcription,
+from ..core import (
+    CRITIC_PROMPT,
+    DEFAULT_SYSTEM_PROMPT,
+    DEFAULT_USER_PROMPT,
+    REFINE_PROMPT,
+    VLMClient,
 )
-
-MAX_ITERATIONS = 3
+from ..core.types import AgenticParseState, CriticOutput
+from ..utils import extract_response_text, extract_transcription
 
 
 class AgenticWorkflow:
     """
-    Self-correcting agentic workflow for document parsing using LangGraph.
+    Self-correcting document parsing workflow with critic/refiner reflect pattern.
 
-    This workflow manages the interaction with a Vision Language Model (VLM) to robustly
-    extract text from documents. It handles common issues such as:
-    - **Token limits**: Automatically continues generation if the output is truncated.
-    - **Repetition loops**: Detects and corrects repetitive text generation loops.
-    - **Incomplete outputs**: Ensures XML tags are properly closed.
+    Flow:
+        generate → critic → [refine → critic]* → complete
 
-    Attributes:
-        vlm_client (VLMClient): The client used to communicate with the VLM.
-        system_prompt (str): The system instructions for the VLM.
-        user_prompt (str): The initial user prompt template.
-        graph (CompiledGraph): The compiled LangGraph executable workflow.
+    Routing is handled inside nodes via Command objects (modern LangGraph pattern).
+    The critic uses Pydantic structured output — no JSON parsing needed.
     """
 
     def __init__(
         self,
-        vlm_client: "VLMClient",
+        vlm_client: VLMClient,
         system_prompt: Optional[str] = None,
-        user_prompt: Optional[str] = None,
         max_iterations: int = 3,
+        max_reflect_cycles: int = 2,
     ):
-        """
-        Initialize the AgenticWorkflow.
+        if max_reflect_cycles > 2:
+            warnings.warn(
+                f"max_reflect_cycles={max_reflect_cycles} exceeds the recommended maximum of 2. "
+                "Token cost multiplier is approximately 4-5x per extra cycle.",
+                UserWarning,
+                stacklevel=2,
+            )
 
-        Args:
-            vlm_client: An instance of VLMClient for making API calls.
-            system_prompt: Optional override for the system prompt. Defaults to XML extraction rules.
-            user_prompt: Optional override for the initial user prompt.
-            max_iterations: Maximum number of iterations to run the workflow.
-        """
-        self.vlm_client = vlm_client
-        self.system_prompt = system_prompt
-        self.user_prompt = user_prompt
-        self.max_iterations = max_iterations
+        self._client = vlm_client
+        self._system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        self._max_iterations = max_iterations
+        self._max_reflect_cycles = max_reflect_cycles
+        self._graph = self._build_graph()
 
-        self.graph = self._build_graph()
+    async def run(self, image_b64: str, mime_type: str) -> Dict[str, Any]:
+        """
+        Run the full reflect workflow for a single page image.
+
+        Returns final state dict with:
+        - accumulated_text: final parsed content
+        - critic_score: last critic score
+        - critic_issues: last issues found
+        - reflect_iteration: number of cycles run
+        """
+        initial_state = self._make_initial_state(image_b64, mime_type)
+        return await self._graph.ainvoke(initial_state)
 
     def _build_graph(self) -> StateGraph:
         """
-        Construct and compile the state graph.
+        Build and compile the LangGraph state graph.
 
-        Returns:
-            A compiled StateGraph ready for execution.
+        Routing happens inside nodes via Command — no add_conditional_edges needed.
+        START goes directly to generate (no redundant start node).
         """
-        builder = StateGraph(AgenticParseState)
+        graph = StateGraph(AgenticParseState)
 
-        builder.add_node("start", self._start_node)
-        builder.add_node(
+        graph.add_node(
             "generate",
-            self._generate_node,
+            self._node_generate,
             retry_policy=RetryPolicy(max_attempts=3, initial_interval=2.0),
         )
-        builder.add_node("complete", self._complete_node)
+        graph.add_node(
+            "critic",
+            self._node_critic,
+            retry_policy=RetryPolicy(max_attempts=3, initial_interval=2.0),
+        )
+        graph.add_node(
+            "refine",
+            self._node_refine,
+            retry_policy=RetryPolicy(max_attempts=3, initial_interval=2.0),
+        )
+        graph.add_node("complete", self._node_complete)
 
-        builder.add_edge(START, "start")
-        builder.add_edge("start", "generate")
+        graph.add_edge(START, "generate")
+        graph.add_edge("generate", "critic")
+        graph.add_edge("refine", "critic")
+        graph.add_edge("complete", END)
 
-        return builder.compile()
+        return graph.compile()
 
-    async def _start_node(self, state: AgenticParseState) -> Dict:
+    async def _node_generate(self, state: AgenticParseState) -> Dict[str, Any]:
         """
-        Initialize the parsing session state.
+        Generator node — initial VLM parse of the document image.
 
-        Args:
-            state: The initial input state.
-
-        Returns:
-            A dictionary updating the state with initial values.
+        Extracts content from <transcription> tags if present.
         """
-        return {
-            "iteration_count": 0,
-            "accumulated_text": "",
-            "current_prompt": self.user_prompt,
-            "generation_history": [],
-        }
-
-    async def _generate_node(
-        self,
-        state: AgenticParseState,
-    ) -> Command[Literal["generate", "complete"]]:
-        """
-        The core generation node that calls the VLM and decides the next step.
-
-        It implements the routing logic based on the response analysis:
-        1. Checks for safety/iteration limits.
-        2. Detects repetition loops.
-        3. Checks for completion logic (valid XML tags).
-        4. Checks for token truncation.
-
-        Args:
-            state: The current state of the parsing workflow.
-
-        Returns:
-            A Command object directing the graph to either 'generate' again or 'complete'.
-        """
-        iteration = state["iteration_count"] + 1
-
-        # Safety limit: Prevent infinite loops
-        if iteration > self.max_iterations:
-            transcription = extract_transcription(state["accumulated_text"])
-            return Command(
-                update={
-                    "accumulated_text": transcription or state["accumulated_text"],
-                    "iteration_count": iteration,
-                },
-                goto="complete",
-            )
-
-        response = await self.vlm_client.invoke(
+        response = await self._client.invoke(
             image_b64=state["image_b64"],
             mime_type=state["mime_type"],
-            system_prompt=self.system_prompt,
+            system_prompt=self._system_prompt,
             user_prompt=state["current_prompt"],
         )
 
-        response_text = response.choices[0].message.content
-        accumulated = state["accumulated_text"] + response_text
+        raw = extract_response_text(response)
+        content = extract_transcription(raw) or raw
 
-        # ========== ROUTING LOGIC ==========
+        return {
+            "accumulated_text": content,
+            "generation_history": [content],
+            "iteration_count": state["iteration_count"] + 1,
+        }
 
-        # Check 1: Repetition loop detection
-        text_before_loop = extract_transcription(accumulated)
-        if text_before_loop is not None:
-            restart_from = (
-                text_before_loop[-500:] if len(text_before_loop) > 500 else text_before_loop
-            )
+    async def _node_critic(
+        self, state: AgenticParseState
+    ) -> Command[Literal["refine", "complete"]]:
+        """
+        Critic node — evaluate structural completeness, then route via Command.
+
+        Uses Pydantic structured output (CriticOutput) — schema enforced at API level.
+        Uses temperature_override=0.1 for deterministic evaluation.
+
+        Returns Command with both the state update AND the routing decision,
+        following the modern LangGraph pattern (no separate conditional edge needed).
+        """
+        critic_user_prompt = (
+            f"Here is the parsed document output to evaluate:```\n{state['accumulated_text']}\n```"
+        )
+
+        response = await self._client.invoke(
+            image_b64=state["image_b64"],
+            mime_type=state["mime_type"],
+            system_prompt=CRITIC_PROMPT,
+            user_prompt=critic_user_prompt,
+            output_schema=CriticOutput,
+            temperature_override=0.1,
+        )
+
+        critic_result: CriticOutput = response.choices[0].message.parsed
+
+        if critic_result is None:
             return Command(
-                update={
-                    "accumulated_text": text_before_loop,
-                    "iteration_count": iteration,
-                    "current_prompt": DEFAULT_SYSTEM_PROMPT.format(restart_from=restart_from),
-                    "generation_history": state.get("generation_history", []) + [response_text],
-                },
-                goto="generate",
-            )
-
-        # Check 2: Successful completion (closing tag found)
-        if extract_transcription(accumulated):
-            return Command(
-                update={
-                    "accumulated_text": accumulated,
-                    "iteration_count": iteration,
-                    "generation_history": state.get("generation_history", []) + [response_text],
-                },
+                update={"critic_score": 0, "critic_issues": []},
                 goto="complete",
             )
 
-        # Check 3: Max tokens hit (truncation)
-        if extract_transcription(response):
-            context = accumulated[-300:] if len(accumulated) > 300 else accumulated
-            return Command(
-                update={
-                    "accumulated_text": accumulated,
-                    "iteration_count": iteration,
-                    "current_prompt": DEFAULT_SYSTEM_PROMPT.format(context=context),
-                    "generation_history": state.get("generation_history", []) + [response_text],
-                },
-                goto="generate",
-            )
+        needs_revision = critic_result.score < 9 and bool(critic_result.issues)
+        cycles_remaining = state["reflect_iteration"] < self._max_reflect_cycles
 
-        # Check 4: Response finished but incomplete (missing closing tag, no explicit error)
-        # This acts as a fallback "continue" mechanism
-        context = accumulated[-300:] if len(accumulated) > 300 else accumulated
-        return Command(
-            update={
-                "accumulated_text": accumulated,
-                "iteration_count": iteration,
-                "current_prompt": DEFAULT_SYSTEM_PROMPT.format(context=context),
-                "generation_history": state.get("generation_history", []) + [response_text],
-            },
-            goto="generate",
-        )
-
-    async def _complete_node(self, state: AgenticParseState) -> Command[Literal[END]]:
-        """
-        Final processing node to extract clean content.
-
-        Args:
-            state: The final accumulation state.
-
-        Returns:
-            Command to END the workflow with the cleaned text.
-        """
-        final_text = extract_transcription(state["accumulated_text"])
+        goto = "refine" if (needs_revision and cycles_remaining) else "complete"
 
         return Command(
             update={
-                "accumulated_text": final_text or state["accumulated_text"],
+                "critic_score": critic_result.score,
+                "critic_issues": critic_result.issues,
             },
-            goto=END,
+            goto=goto,
         )
 
-    async def run(self, image_b64: str, mime_type: str) -> dict:
+    async def _node_refine(self, state: AgenticParseState) -> Dict[str, Any]:
         """
-        Execute the workflow on an image.
+        Refiner node — targeted fix based on critic issues.
 
-        Args:
-            image_b64: Base64 encoded image string.
-            mime_type: MIME type of the image.
-
-        Returns:
-            The final state dictionary containing the parsed text.
+        Fixes ONLY the listed structural issues. Does not rewrite
+        content that the critic did not flag.
         """
-        result = await self.graph.ainvoke(
-            {
-                "image_b64": image_b64,
-                "mime_type": mime_type,
-            }
+        issues_text = (
+            "\n".join(f"- {issue}" for issue in state["critic_issues"])
+            or "- General structural improvements needed"
         )
 
-        return result
+        refine_user_prompt = REFINE_PROMPT.format(
+            issues=issues_text,
+            current_output=state["accumulated_text"],
+        )
+
+        response = await self._client.invoke(
+            image_b64=state["image_b64"],
+            mime_type=state["mime_type"],
+            system_prompt=self._system_prompt,
+            user_prompt=refine_user_prompt,
+        )
+
+        raw = extract_response_text(response)
+        refined = extract_transcription(raw) or raw
+
+        return {
+            "accumulated_text": refined,
+            "generation_history": [refined],
+            "reflect_iteration": state["reflect_iteration"] + 1,
+        }
+
+    async def _node_complete(self, state: AgenticParseState) -> Dict[str, Any]:
+        """
+        Terminal node — required waypoint before END.
+        LangGraph conditional edges via Command cannot point directly to END.
+        Intentionally empty; extend here for post-processing if needed.
+        """
+        return {}
+
+    def _make_initial_state(self, image_b64: str, mime_type: str) -> AgenticParseState:
+        """Build a clean initial state for the workflow."""
+        return AgenticParseState(
+            image_b64=image_b64,
+            mime_type=mime_type,
+            accumulated_text="",
+            iteration_count=0,
+            current_prompt=DEFAULT_USER_PROMPT,
+            generation_history=[],
+            critic_score=0,
+            critic_issues=[],
+            reflect_iteration=0,
+        )
