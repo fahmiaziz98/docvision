@@ -8,6 +8,11 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-yellow.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ---
+> [!WARNING]
+> **This project is still under active development and is not ready for production environments.**
+> The API, code structure, and behavior may change at any time without prior notice.
+> Use only in development or experimental environments.
+---
 
 ## Overview
 
