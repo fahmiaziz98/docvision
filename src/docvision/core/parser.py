@@ -36,7 +36,6 @@ class DocumentParser:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         system_prompt: Optional[str] = None,
-        max_iterations: int = 3,
         max_reflect_cycles: int = 2,
         ocr_language: str = "english",
         ocr_model_dir: Optional[Union[str, Path]] = None,
@@ -104,7 +103,6 @@ class DocumentParser:
             AgenticWorkflow(
                 vlm_client=self._client,
                 system_prompt=system_prompt,
-                max_iterations=max_iterations,
                 max_reflect_cycles=max_reflect_cycles,
             )
             if self._client

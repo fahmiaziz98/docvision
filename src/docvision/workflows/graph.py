@@ -30,7 +30,6 @@ class AgenticWorkflow:
         self,
         vlm_client: VLMClient,
         system_prompt: Optional[str] = None,
-        max_iterations: int = 3,
         max_reflect_cycles: int = 2,
     ):
         if max_reflect_cycles > 2:
@@ -43,7 +42,6 @@ class AgenticWorkflow:
 
         self._client = vlm_client
         self._system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
-        self._max_iterations = max_iterations
         self._max_reflect_cycles = max_reflect_cycles
         self._graph = self._build_graph()
 

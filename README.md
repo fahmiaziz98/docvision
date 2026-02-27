@@ -1,6 +1,6 @@
 # 📄 DocVision Parser
 
-> Framework document parsing powered by Vision Language Models (VLMs) and PDF extraction.
+> Framework document parsing powered by Vision Language Models (VLMs) and OCR.
 
 [![Tests](https://github.com/fahmiaziz98/doc-vision-parser/workflows/Tests/badge.svg)](https://github.com/fahmiaziz98/doc-vision-parser/actions)
 [![PyPI version](https://badge.fury.io/py/docvision.svg)](https://badge.fury.io/py/docvision)
@@ -11,25 +11,30 @@
 
 ## Overview
 
-DocVision Parser is a robust Python library designed to extract high-quality structured text and markdown from documents (images and PDFs). It combines the speed of **native PDF extraction** with the reasoning power of **Vision Language Models** (like GPT-4o, Claude, or Llama 3.2).
+DocVision Parser is a Python library for extracting high-quality structured text and markdown from documents (images and PDFs). It combines **PaddleOCR ONNX** for fast, offline text extraction with the reasoning power of **Vision Language Models** (GPT-4o, Claude, Llama, etc.).
 
-The framework provides three powerful parsing modes:
-1.  **PDF (Native)**: Ultra-fast extraction of text and tables using deterministic rules.
-2.  **VLM Mode**: High-fidelity single-shot parsing using Vision models to understand layout and context.
-3.  **Agentic Mode**: A self-correcting, iterative workflow that handles long documents and complex layouts by automatically detecting truncation or repetition.
+Three parsing modes:
 
-## Features
+| Mode | Best For | Requires |
+| :--- | :--- | :--- |
+| **BASIC_OCR** | Fast offline extraction, no GPU needed | — |
+| **VLM** | Complex layouts, handwriting, mixed content | VLM API key |
+| **AGENTIC** | Long documents, dense tables, self-correcting | VLM API key |
 
--   **Hybrid PDF Parsing**: Extract native text/tables and optionally use VLM to describe charts and images in-situ.
--   **Agentic/Iterative Workflow**: Self-correcting loop that handles model token limits and ensures complete transcription for long pages.
--   **Intelligent Vision Pipeline**: Automatic image rotation correction, DPI management, and dynamic optimization for the best VLM input.
--   **Async-First**: High-throughput processing with built-in concurrency control (Semaphores).
--   **Structured Output**: Native Pydantic support for extracting structured JSON data from any document.
--   **Production-Ready**: Automatic retries, error handling, and direct export to Markdown or JSON files.
+---
+
+## What's New in v0.3.0
+
+- **`BASIC_OCR` mode** — PaddleOCR ONNX via RapidOCR, models auto-downloaded from HuggingFace on first use. No PyTorch, no GPU required.
+- **Dual preprocessing pipeline** — `preprocess_for_ocr` (CLAHE, deskew, DPI normalization) and `preprocess_for_vlm` (adaptive resize, rotation, crop) are now separate optimized pipelines.
+- **Agentic reflect pattern** — Critic/refiner replace the old repetition-detection loop. Critic uses Pydantic structured output for reliable evaluation.
+- **Multi-language OCR** — English, Latin (ID/FR/DE/ES), Chinese, Korean, Arabic, Hindi, Tamil, Telugu.
+- **Breaking**: `ParsingMode.PDF` renamed to `ParsingMode.BASIC_OCR`.
+- **Breaking**: `process_image()` replaced by `preprocess_for_ocr()` / `preprocess_for_vlm()`.
+
+---
 
 ## Installation
-
-Install using `pip`:
 
 ```bash
 pip install docvision
@@ -41,57 +46,73 @@ Or using `uv` (recommended):
 uv add docvision
 ```
 
+> **Note:** OCR models (~100MB) are downloaded automatically to `~/.cache/docvision/models/` on first use.
+
 ---
 
 ## Quick Start
 
-### Basic Usage
-
-Initialize the `DocumentParser` and parse an image into Markdown.
+### BASIC_OCR — No API key needed
 
 ```python
 import asyncio
-from docvision import DocumentParser
+from docvision import DocumentParser, ParsingMode
 
 async def main():
-    # Initialize the parser
     parser = DocumentParser(
-        vlm_base_url="https://api.openai.com/v1",
-        vlm_model="gpt-4o-mini",
-        vlm_api_key="your_api_key"
+        ocr_language="english",  # or "latin" for Indonesian/European
     )
 
-    # Parse an image
-    result = await parser.parse_image("document.jpg")
-    
+    # Parse a single image
+    result = await parser.parse_image("document.jpg", parsing_mode=ParsingMode.BASIC_OCR)
     print(result.content)
-    print(f"ID: {result.id}")
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    # Parse a PDF
+    results = await parser.parse_pdf("report.pdf", parsing_mode=ParsingMode.BASIC_OCR)
+    for page in results:
+        print(f"Page {page.metadata['page_number']}:\n{page.content}")
+
+asyncio.run(main())
 ```
 
-### Parsing PDFs
-
-The parser can handle PDFs using different strategies.
+### VLM — High-fidelity parsing
 
 ```python
 from docvision import DocumentParser, ParsingMode
 
-async def parse_doc():
-    parser = DocumentParser(vlm_base_url=..., vlm_model=..., vlm_api_key=...)
+async def main():
+    parser = DocumentParser(
+        base_url="https://api.openai.com/v1",
+        model_name="gpt-4o-mini",
+        api_key="your_api_key",
+    )
 
-    # Mode 1: Native PDF (Fastest, no Vision costs)
-    results = await parser.parse_pdf("report.pdf", parsing_mode=ParsingMode.PDF)
+    result = await parser.parse_image("scanned.jpg", parsing_mode=ParsingMode.VLM)
+    print(result.content)
+```
 
-    # Mode 2: VLM (Best for complex layouts/handwriting)
-    results = await parser.parse_pdf("scanned.pdf", parsing_mode=ParsingMode.VLM)
+### AGENTIC — Self-correcting for complex documents
 
-    # Mode 3: AGENTIC (Self-correcting for long tables/text)
-    results = await parser.parse_pdf("dense.pdf", parsing_mode=ParsingMode.AGENTIC)
+```python
+async def main():
+    parser = DocumentParser(
+        base_url="https://api.openai.com/v1",
+        model_name="gpt-4o",
+        api_key="your_api_key",
+        max_reflect_cycles=2,  # critic→refine cycles per page (default: 2, max recommended: 2)
+    )
 
-    # Save results directly to file
-    await parser.parse_pdf("input.pdf", save_path="./output/results.md")
+    results = await parser.parse_pdf(
+        "dense_report.pdf",
+        parsing_mode=ParsingMode.AGENTIC,
+        start_page=1,
+        end_page=10,
+    )
+
+    for page in results:
+        print(f"Page {page.metadata['page_number']} "
+              f"(critic score: {page.metadata['final_critic_score']}):\n"
+              f"{page.content}")
 ```
 
 ---
@@ -100,75 +121,133 @@ async def parse_doc():
 
 ### Structured Output (JSON)
 
-Extract data directly into Pydantic models.
+Extract data directly into Pydantic models using VLM mode.
 
 ```python
 from pydantic import BaseModel
 from typing import List
 
-class Item(BaseModel):
+class LineItem(BaseModel):
     description: str
+    quantity: int
     price: float
 
 class Invoice(BaseModel):
     invoice_no: str
-    items: List[Item]
+    total: float
+    items: List[LineItem]
 
-# Note: system_prompt is required when using structured output
 parser = DocumentParser(
-    vlm_api_key="...", 
-    system_prompt="Extract invoice details correctly."
+    base_url="...",
+    model_name="gpt-4o",
+    api_key="...",
+    system_prompt="Extract all invoice fields accurately.",
 )
 
 result = await parser.parse_image("invoice.png", output_schema=Invoice)
-print(result.content.invoice_no) # Content is now a Pydantic object
+# result.content is a JSON string of the validated Invoice
+print(result.content)
 ```
 
-### Hybrid Parsing (Native + VLM)
-
-Use native extraction for text but let the VLM describe the charts.
+### Multi-language OCR
 
 ```python
-parser = DocumentParser(
-    vlm_api_key="...", 
-    chart_description=True # This enables VLM hybrid for Native Mode
-)
+# Indonesian, French, German, Spanish, etc. → use "latin"
+parser = DocumentParser(ocr_language="latin")
 
-# Text and Tables are extracted natively, but <chart> tags 
-# will contain VLM-generated descriptions.
-results = await parser.parse_pdf("chart_heavy.pdf", parsing_mode=ParsingMode.PDF)
+# Chinese, Korean, Arabic, Hindi, Tamil, Telugu
+parser = DocumentParser(ocr_language="chinese")
+
+# Custom model directory (skip auto-download)
+parser = DocumentParser(
+    ocr_language="english",
+    ocr_model_dir="/path/to/models",
+)
+```
+
+### Save Results
+
+```python
+# Save as Markdown
+await parser.parse_pdf("input.pdf", save_path="output/result.md")
+
+# Save as JSON
+await parser.parse_pdf("input.pdf", save_path="output/result.json")
+
+# Save to directory (auto-creates output.json inside)
+await parser.parse_pdf("input.pdf", save_path="output/")
 ```
 
 ---
 
 ## Configuration
 
-The `DocumentParser` is configured during initialization.
+```python
+parser = DocumentParser(
+    # VLM config (required for VLM and AGENTIC modes)
+    base_url="https://api.openai.com/v1",
+    model_name="gpt-4o",
+    api_key="your_key",
+    temperature=0.7,
+    max_tokens=4096,
+    system_prompt=None,
 
-| Parameter | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `vlm_base_url` | `str` | `None` | OpenAI-compatible API base URL. |
-| `vlm_model` | `str` | `None` | Model name (e.g., `gpt-4o`). |
-| `vlm_api_key` | `str` | `None` | Your API key. |
-| `temperature` | `float` | `0.7` | Model sampling temperature. |
-| `max_tokens` | `int` | `4096` | Max tokens per VLM call. |
-| `max_iterations` | `int` | `3` | Max retries/loops in Agentic mode. |
-| `max_concurrency`| `int` | `5` | Max concurrent pages being processed. |
-| `enable_rotate` | `bool` | `True` | Auto-fix image orientation. |
-| `chart_description`| `bool` | `False`| Use VLM to describe charts in Native mode. |
-| `render_zoom` | `float` | `2.0` | DPI multiplier for PDF rendering. |
-| `debug_dir` | `str` | `None` | Directory to save debug images. |
+    # Agentic config
+    max_reflect_cycles=2,       # values > 2 emit UserWarning
+
+    # OCR config (for BASIC_OCR mode)
+    ocr_language="english",     # see supported languages below
+    ocr_model_dir=None,         # None = auto-download to ~/.cache/docvision/
+
+    # Image processing
+    enable_crop=True,           # crop image to content
+    enable_rotate=True,         # auto-correct orientation
+    enable_deskew=True,         # correct small skew angles (OCR mode)
+    dpi=300,                    # PDF render DPI multiplier
+    post_crop_max_size=1024,    # max image dimension for VLM input
+    max_concurrency=5,          # max concurrent pages
+    debug_dir=None,             # save debug images here
+)
+```
+
+### Supported OCR Languages
+
+| Value | Covers |
+| :--- | :--- |
+| `"english"` | English |
+| `"latin"` | Indonesian, French, German, Spanish, Portuguese, and other Latin-script languages |
+| `"chinese"` | Simplified + Traditional Chinese |
+| `"korean"` | Korean |
+| `"arabic"` | Arabic |
+| `"hindi"` | Hindi (Devanagari) |
+| `"tamil"` | Tamil |
+| `"telugu"` | Telugu |
 
 ---
 
 ## Architecture
 
-DocVision Parser is built for reliability and scale:
+```
+DocumentParser
+├── VLMClient          — async OpenAI-compatible API
+├── OCREngine          — PaddleOCR ONNX via RapidOCR, HuggingFace 
+├── ImageProcessor
+│   ├── preprocess_for_ocr()   — deskew, DPI normalization, CLAHE contrast
+│   └── preprocess_for_vlm()   — adaptive resize
+└── AgenticWorkflow (LangGraph)
+    ├── generate   — initial VLM parse
+    ├── critic     — structural evaluation via Pydantic structured output
+    ├── refine     — targeted fix based on critic issues
+    └── complete   — terminal node
+```
 
-1.  **VLMClient**: Handles asynchronous communication with OpenAI/Groq/OpenRouter with built-in retries and timeout management.
-2.  **NativePDFParser**: Uses `pdfplumber` to extract structured text and complex tables while maintaining reading order.
-3.  **ImageProcessor**: A high-performance pipeline for converting PDFs and optimizing images (resizing, padding, rotating).
-4.  **AgenticWorkflow**: A state-machine that manages long-running generation tasks, ensuring complete document transcription.
+**Agentic reflect loop:**
+```
+generate → critic ──(score ≥ 8 or max cycles)──→ complete → END
+               └──(score < 9)──→ refine → critic (loop)
+```
+
+---
 
 ## Development
 
@@ -176,17 +255,19 @@ DocVision Parser is built for reliability and scale:
 # Setup
 uv sync --dev
 
-# Run Tests
+# Run tests
 make test
 
-# Lint & Format
+# Lint & format
 make lint
 make format
 ```
 
+---
+
 ## License
 
-Apache 2.0 License. See [LICENSE](LICENSE) for details.
+Apache 2.0. See [LICENSE](LICENSE) for details.
 
 ## Author
 
