@@ -1,4 +1,3 @@
-import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -11,7 +10,7 @@ from docvision.core.types import ParseResult, ParsingMode
 
 def _make_vlm_response(content: str = "Extracted text content"):
     """Build a mock VLM response.
-    
+
     Note: _call_vlm calls extract_transcription() on the raw content.
     To get a clean string back, wrap content in <transcription> tags.
     """
@@ -60,15 +59,12 @@ def parser(mock_vlm_client, mock_image_processor):
 
 @pytest.mark.unit
 class TestDocumentParser:
-
     @pytest.mark.asyncio
     async def test_parse_image_vlm(self, parser, mock_vlm_client):
         img_array = np.zeros((100, 100, 3), dtype=np.uint8)
 
         with patch.object(parser, "_load_image", return_value=img_array):
-            result = await parser.parse_image(
-                "test_image.jpg", parsing_mode=ParsingMode.VLM
-            )
+            result = await parser.parse_image("test_image.jpg", parsing_mode=ParsingMode.VLM)
 
         assert isinstance(result, ParseResult)
         assert result.content == "Extracted text content"
@@ -109,9 +105,7 @@ class TestDocumentParser:
             field: str
 
         # For structured output, .parsed is used — mock it with the schema instance
-        mock_vlm_client.invoke.return_value.choices[0].message.parsed = TestModel(
-            field="hello"
-        )
+        mock_vlm_client.invoke.return_value.choices[0].message.parsed = TestModel(field="hello")
 
         img_array = np.zeros((100, 100, 3), dtype=np.uint8)
 

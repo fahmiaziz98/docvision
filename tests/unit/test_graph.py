@@ -8,10 +8,8 @@ Mock response.choices[0].message.parsed instead of raw JSON string.
 import warnings
 
 import pytest
-from langgraph.types import Command
 
 from docvision.workflows.graph import AgenticWorkflow, CriticOutput
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -21,6 +19,7 @@ from docvision.workflows.graph import AgenticWorkflow, CriticOutput
 def _make_text_response(content: str):
     """Mock VLM response for generate/refine nodes (plain text content)."""
     from unittest.mock import MagicMock
+
     resp = MagicMock()
     resp.choices[0].message.content = content
     resp.choices[0].message.parsed = None
@@ -30,8 +29,9 @@ def _make_text_response(content: str):
 def _make_critic_response(score: int, issues: list, needs_revision: bool):
     """Mock VLM response for critic node (structured output via .parsed)."""
     from unittest.mock import MagicMock
+
     resp = MagicMock()
-    resp.choices[0].message.content = ""   # not used for structured output
+    resp.choices[0].message.content = ""  # not used for structured output
     resp.choices[0].message.parsed = CriticOutput(
         score=score,
         issues=issues,
@@ -47,7 +47,6 @@ def _make_critic_response(score: int, issues: list, needs_revision: bool):
 
 @pytest.mark.unit
 class TestCriticOutput:
-
     def test_valid_instantiation(self):
         obj = CriticOutput(score=8, issues=["minor gap"], needs_revision=False)
         assert obj.score == 8
@@ -72,9 +71,9 @@ class TestCriticOutput:
         props = schema.get("properties", {})
         for field_name in ("score", "issues", "needs_revision"):
             assert field_name in props, f"Missing field: {field_name}"
-            assert "description" in props[field_name], (
-                f"Field '{field_name}' missing description — LLM won't know what to fill"
-            )
+            assert (
+                "description" in props[field_name]
+            ), f"Field '{field_name}' missing description — LLM won't know what to fill"
 
 
 # ---------------------------------------------------------------------------
@@ -84,15 +83,16 @@ class TestCriticOutput:
 
 @pytest.mark.unit
 class TestAgenticWorkflow:
-
     def test_max_reflect_cycles_warning(self):
         from unittest.mock import MagicMock
+
         client = MagicMock()
         with pytest.warns(UserWarning, match="max_reflect_cycles"):
             AgenticWorkflow(vlm_client=client, max_reflect_cycles=3)
 
     def test_no_warning_at_max_2(self):
         from unittest.mock import MagicMock
+
         client = MagicMock()
         with warnings.catch_warnings():
             warnings.simplefilter("error")
@@ -101,7 +101,7 @@ class TestAgenticWorkflow:
     @pytest.mark.asyncio
     async def test_happy_path_no_revision(self):
         """generate → critic (score=9) → complete. Only 2 API calls."""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import MagicMock
 
         call_count = 0
         responses = [
@@ -187,7 +187,7 @@ class TestAgenticWorkflow:
     @pytest.mark.asyncio
     async def test_critic_structured_output_is_passed_as_schema(self):
         """Verify output_schema=CriticOutput is forwarded to VLMClient.invoke()."""
-        from unittest.mock import MagicMock, call
+        from unittest.mock import MagicMock
 
         call_kwargs = []
 
@@ -220,6 +220,7 @@ class TestAgenticWorkflow:
             return _make_critic_response(9, [], False)
 
         from unittest.mock import MagicMock
+
         client = MagicMock()
         client.invoke = mock_invoke
 
