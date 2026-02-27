@@ -24,6 +24,10 @@ check:
 	$(UV) run $(RUFF) format --check .
 	$(UV) run $(BLACK) src/ tests/
 
+black:
+	$(UV) run $(BLACK) src/ tests/
+	$(UV) run $(BLACK) --check src/ tests/
+
 # Testing
 test:
 	$(UV) run $(PYTEST)

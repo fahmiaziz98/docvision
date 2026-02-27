@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "docvision"
-version = "0.2.0"
+version = "0.3.0"
 description = "Production-ready document parsing with Vision Language Models"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,8 +31,10 @@ dependencies = [
     "numpy>=2.0.2",
     "scipy>=1.11.0",
     "langgraph>=1.0.7",
-    "pdfplumber>=0.11.9",
     "pydantic>=2.12.5",
+    "rapidocr-onnxruntime>=1.4.4",
+    "huggingface-hub>=1.4.1",
+    "tqdm>=4.67.2",
 ]
 
 [dependency-groups]

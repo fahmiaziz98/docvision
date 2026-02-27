@@ -1,6 +1,6 @@
 from .crop import ContentCropper
 from .image import ImageProcessor
-from .pdf_parser import NativePDFParser
+from .ocr_engine import OCREngine
 from .rotate import AutoRotate
 
-__all__ = ["ContentCropper", "ImageProcessor", "AutoRotate", "NativePDFParser"]
+__all__ = ["ImageProcessor", "AutoRotate", "OCREngine", "ContentCropper"]

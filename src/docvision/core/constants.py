@@ -45,25 +45,45 @@ IGNORE
 - Watermarks and diagonal background text.
 """
 
-DEFAULT_USER_PROMPT = "Transcribe this document into Markdown. Follow all rules. Output only the <transcription> block."
-
-CONTINUE_PROMPT = """\
-Continue the transcription from exactly where you stopped. Do not repeat what is already written.
-
-Last content written:
-...{context}
-
-Continue from this point. Close with </transcription> when the full page is done.\
-"""
-
-FIX_PROMPT = """\
-You got stuck in a repetition loop. Resume transcription from before the loop started.
-
-Last valid content:
-...{restart_from}
-
-Continue from this exact point. Do not repeat anything already written.
-Close with </transcription> when the full page is done.\
-"""
+DEFAULT_USER_PROMPT = (
+    "Transcribe this document into Markdown. "
+    "Follow all rules. Output only the <transcription> block."
+)
 
 TRANSCRIPTION = "IMPORTANT: Wrap ONLY the content in <transcription></transcription> tags."
+
+CRITIC_PROMPT = """You are a Document Structure Evaluator.
+Evaluate STRUCTURAL COMPLETENESS only. Do NOT verify accuracy.
+
+Check for:
+1. Cut-off tables/missing '|' separators.
+2. Illogical reading order or broken flows.
+3. Abrupt truncation (sentences ending mid-word).
+4. Formatting loops or duplicated blocks.
+
+Scoring:
+- 8-10: Complete/Minor issues.
+- 0-7: Structural failure/Incomplete.
+
+Output ONLY JSON:
+{
+  "score": <int>,
+  "issues": ["<short_description>"],
+  "needs_revision": <bool_if_score_lt_8>
+}"""
+
+REFINE_PROMPT = """You are a Document Parsing Corrector.
+
+ISSUES TO FIX:
+{issues}
+
+CURRENT OUTPUT:
+{current_output}
+
+INSTRUCTIONS:
+1. Fix ONLY the listed issues.
+2. Do NOT change or summarize correct content.
+3. Remove duplicates or complete any truncated sentences exactly.
+4. If the table structure is broken, realign the pipes '|'.
+
+Output the full corrected version inside <transcription> tags."""
